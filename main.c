@@ -116,10 +116,8 @@ void editorOutputBufferText(struct editorBuffer *buffer) {
 }
 
 void editorRefreshCurrentLine(struct editorBuffer *buffer){
-  write(STDOUT_FILENO, "\x1b[2K", 4); // clear the line
-  write(STDOUT_FILENO, "\x1b[H", 3);
+  write(STDOUT_FILENO, "\x1b[1D\x1b[0K", 8);
   char *str = buffer->lines[buffer->cur_y];
-
   while (*str != '\0') {
     write(STDOUT_FILENO, str, 1);
     str++;
@@ -128,18 +126,17 @@ void editorRefreshCurrentLine(struct editorBuffer *buffer){
 
 //INPUT
 void deleteChar(struct editorBuffer *buffer){
+  if(buffer->cur_x==0) return;
   moveCharsLeft(buffer->cur_line, buffer->cur_x, 1);
   buffer->cur_x--;
+  write(STDOUT_FILENO, "\x1b[1D\x1b[P", 7);
 }
+
 
 void writeCurrentLineToBuffer(struct editorBuffer *buffer){
   int size = strlen(buffer->cur_line);
 
-  if(buffer->lines[buffer->numlines] != NULL){
-    write(STDOUT_FILENO, " free memory ", 12);
-    sleep(1);
-    free(buffer->lines[buffer->numlines]);
-  }
+  if(buffer->lines[buffer->numlines] != NULL) free(buffer->lines[buffer->numlines]);
   buffer->lines[buffer->numlines] = malloc(size);
 
   if (buffer->lines[buffer->numlines] == NULL) {
@@ -150,7 +147,7 @@ void writeCurrentLineToBuffer(struct editorBuffer *buffer){
   //TODO if its not the last line of the file, we need to move the rest of the lines in the buffer to be able to make the space
 }
 
-char editorReadKey(struct editorBuffer *buffer){
+char editorReadKey(){
   char nread; // output result code
   char c;
   while((nread = read(STDIN_FILENO, &c, 1)) != 1 ){
@@ -175,10 +172,10 @@ void bufferWriteChar(struct editorBuffer *buffer, char c){
 
 void handleEscapeSequence(struct editorBuffer *buffer){
   if(!isInputAvailable()) return;
-  char c = editorReadKey(buffer);
+  char c = editorReadKey();
   if(c!='[') return;
   if(!isInputAvailable()) return;
-  c = editorReadKey(buffer);
+  c = editorReadKey();
   switch (c) {
     case 'A':
       write(STDOUT_FILENO, "Arrow Up", 8);
@@ -204,7 +201,7 @@ void handleEscapeSequence(struct editorBuffer *buffer){
 
 void editorProcessKeypress(struct editorBuffer *buffer)
   {
-    char c = editorReadKey(buffer);
+    char c = editorReadKey();
 
 
     switch(c)
@@ -228,16 +225,14 @@ void editorProcessKeypress(struct editorBuffer *buffer)
           editorOutputBufferText(buffer);
           break;
         case DEL:
+          if(buffer->cur_x==0) break;
           deleteChar(buffer);
           writeCurrentLineToBuffer(buffer);
-          editorRefreshCurrentLine(buffer);
-          write(STDOUT_FILENO, "\b \b", 3);
           break;
         case BACKSPACE:
+          if(buffer->cur_x==0) break;
           deleteChar(buffer);
           writeCurrentLineToBuffer(buffer);
-          editorRefreshCurrentLine(buffer);
-          write(STDOUT_FILENO, "\b \b", 3);
           break;
         case ('\x1b'):
           handleEscapeSequence(buffer);
