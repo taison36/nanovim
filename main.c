@@ -8,6 +8,7 @@
 #include <unistd.h>
 #include <poll.h>
 #include <string.h>
+#include <sys/ioctl.h>
 
 #define CTRL_KEY(k) ((k) & 0x1f)
 #define MAXLINES 1000
@@ -18,25 +19,56 @@
 
 struct termios orig_termios;
 
-struct editorBuffer{
+struct TextBuffer{
   char *lines[MAXLINES];
   int numlines;
-  int cur_x;
-  int cur_y;
-  char cur_line[SIZELINE];
+  int curX;
+  int curY;
+  char curLine[SIZELINE];
 };
 
-struct editorBuffer makeStringBuffer(){
-  struct editorBuffer buffer;
-  buffer.cur_x=0;
-  buffer.cur_y=0;
+struct WindowSettings{
+  int terminalX;
+  int terminalY;
+  int topOffset;
+  int bottomOffset;
+};
+
+struct CursorCoordinates{
+  int x;
+  int y;
+};
+
+
+struct TextBuffer textBuffer(){
+  struct TextBuffer buffer;
+  buffer.curX=0;
+  buffer.curY=0;
   buffer.numlines=0;
   for(int i = 0; i<MAXLINES; i++){
     buffer.lines[i] = NULL;
   }
+  *buffer.curLine='\0';
   return buffer;
 }
 
+struct WindowSettings windowSettings(){
+  struct WindowSettings ws;
+  struct winsize w;
+  if(ioctl(STDOUT_FILENO, TIOCGWINSZ, &w)==-1){
+    perror("ioctl");
+    exit(1);
+  }
+
+  ws.terminalX = w.ws_col;
+  ws.terminalY = w.ws_row;
+  ws.topOffset = 0;
+  ws.bottomOffset = 0;
+  return ws;
+}
+
+static struct WindowSettings ws;
+static struct CursorCoordinates cursor = {0,0};
 
 // TERMINAL
 void die(const char *s){
@@ -66,7 +98,13 @@ void enableRawMode(){
 }
 
 //HELPER
-void linecopy(char *to, char *from) {
+
+void dbgPrint(char *s){
+  write(STDOUT_FILENO, s, strlen(s));
+  sleep(1);
+}
+
+void copyLine(char *to, char *from) {
   while (*from != '\0') {
     *to++ = *from++;
   }
@@ -100,12 +138,69 @@ void moveCharsLeft(char *str, int cur_pos, int n) {
     }
 }
 // OUTPUT
-void editorRefreshScreen() {
-  write(STDOUT_FILENO, "\x1b[2J", 4);
-  write(STDOUT_FILENO, "\x1b[H", 3);
+//TODO Добавить логику, когда есть скроллинг. То есть показывать не buffer->lines[i], а со строки ниже где находишься
+char* editorPrepareBufferForScreen(struct TextBuffer *buffer) {
+    int size = 2500;
+    char* screenBuffer = malloc(size);
+    if (!screenBuffer) die("editorPrepareBufferForScreen: malloc failed");
+    int appended = 0;
+
+    int maxX = ws.terminalX;
+    int maxY = ws.terminalY - (ws.bottomOffset + ws.topOffset);
+    int shownY = 0;
+
+    for (int i = 0; i <= buffer->numlines && shownY < maxY; i++) {
+        char* line = buffer->lines[i];
+        if(line==NULL) continue;
+        int len = strlen(line); //15
+        int offset = 0; // 0
+
+        while (offset < len && shownY < maxY) {
+            int remain = len - offset; //15
+            int lineLength = (remain > maxX) ? maxX : remain; //10
+
+            if (appended + lineLength + 2 >= size) {
+                size *= 2;
+                screenBuffer = realloc(screenBuffer, size);
+                if (!screenBuffer) die("editorPrepareBufferForScree: realloc failed");
+            }
+
+            memcpy(&screenBuffer[appended], &line[offset], lineLength);
+            appended += lineLength;
+
+            if(remain>maxX){
+              screenBuffer[appended++] = '\r';
+              screenBuffer[appended++] = '\n';
+            }
+
+            offset += lineLength;
+            shownY++;
+        }
+    }
+
+    screenBuffer[appended] = '\0';
+    return screenBuffer;
 }
 
-void editorOutputBufferText(struct editorBuffer *buffer) {
+
+void editorRefreshScreen(struct TextBuffer *buffer) {
+  //save cursor pos
+  write(STDOUT_FILENO, "\x1b[s", 3);
+
+  //clear the terminal
+  write(STDOUT_FILENO, "\x1b[2J", 4);
+  //put cursor to the top
+  write(STDOUT_FILENO, "\x1b[H", 3);
+
+  char* screenBuffer = editorPrepareBufferForScreen(buffer);
+
+  write(STDOUT_FILENO, screenBuffer, strlen(screenBuffer));
+
+  //put the cursor back
+  write(STDOUT_FILENO, "\x1b[u", 3);
+}
+
+void editorOutputBufferText(struct TextBuffer *buffer) {
   for (int i = 0; i < buffer->numlines; i++) {
     char *str = buffer->lines[i];
     while (*str != '\0') {
@@ -115,35 +210,27 @@ void editorOutputBufferText(struct editorBuffer *buffer) {
   }
 }
 
-void editorRefreshCurrentLine(struct editorBuffer *buffer){
-  write(STDOUT_FILENO, "\x1b[1D\x1b[0K", 8);
-  char *str = buffer->lines[buffer->cur_y];
-  while (*str != '\0') {
-    write(STDOUT_FILENO, str, 1);
-    str++;
-  }
-}
 
 //INPUT
-void deleteChar(struct editorBuffer *buffer){
-  if(buffer->cur_x==0) return;
-  moveCharsLeft(buffer->cur_line, buffer->cur_x, 1);
-  buffer->cur_x--;
-  write(STDOUT_FILENO, "\x1b[1D\x1b[P", 7);
+
+void curLineDeleteChar(struct TextBuffer *buffer){
+  if(buffer->curX==0) return;
+  moveCharsLeft(buffer->curLine, buffer->curX, 1);
+  write(STDOUT_FILENO, "\x1b[P", 3);
 }
 
 
-void writeCurrentLineToBuffer(struct editorBuffer *buffer){
-  int size = strlen(buffer->cur_line);
+void bufferWriteCurrentLine(struct TextBuffer *buffer){
+  int size = strlen(buffer->curLine);
 
-  if(buffer->lines[buffer->numlines] != NULL) free(buffer->lines[buffer->numlines]);
-  buffer->lines[buffer->numlines] = malloc(size);
+  if(buffer->lines[buffer->curY] != NULL) free(buffer->lines[buffer->curY]);
+  buffer->lines[buffer->curY] = malloc(size);
 
-  if (buffer->lines[buffer->numlines] == NULL) {
+  if (buffer->lines[buffer->curY] == NULL) {
     die("writeCurrentLineToBuffer: malloc failed");
   }
   //check I am at the last line
-  linecopy(buffer->lines[buffer->cur_y], buffer->cur_line);
+  copyLine(buffer->lines[buffer->curY], buffer->curLine);
   //TODO if its not the last line of the file, we need to move the rest of the lines in the buffer to be able to make the space
 }
 
@@ -156,21 +243,47 @@ char editorReadKey(){
   return c;
 }
 
-void bufferWriteChar(struct editorBuffer *buffer, char c){
+void curLineWriteChar(struct TextBuffer *buffer, char c){
   //после каждого записанного char ставить в конце \0
   //перед записью нового символа вычислять длину строки и тем самым определять находиться ли cur_x в конце
   //если в конце, то просто писать дальше
   //если нет, двигать поинеты вперед и писать между ними
-  if (buffer->cur_x > SIZELINE - 1) die("bufferWriteChar: SIZELINE is exceeded");
+  if (buffer->curX > SIZELINE - 1) die("bufferWriteChar: SIZELINE is exceeded");
 
-  buffer->cur_line[buffer->cur_x++] = c;
-  int size = sizeof(buffer->cur_line);
-  if(size==buffer->cur_x){
-    buffer->cur_line[buffer->cur_x++] = '\0';
+  int len = strlen(buffer->curLine);
+
+
+  buffer->curLine[buffer->curX] = c;
+
+  if(len == buffer->curX){
+    buffer->curLine[buffer->curX+1] = '\0';
   }
+  buffer->curX++;
 }
 
-void handleEscapeSequence(struct editorBuffer *buffer){
+void bufferHandleIncreaseCurY(struct TextBuffer *buffer){
+  if(buffer->curY==buffer->numlines){
+    buffer->numlines++;
+  }
+  buffer->curY++;
+}
+void curLineClear(struct TextBuffer *buffer){
+  buffer->curX=0;
+  buffer->curLine[buffer->curX] = '\0'; // clear current line;
+}
+
+void bufferHandleEditorNextLine(struct TextBuffer *buffer){
+  curLineWriteChar(buffer, '\r');
+  curLineWriteChar(buffer, '\n');
+  bufferWriteCurrentLine(buffer);
+
+  write(STDOUT_FILENO, "\x1b[1E", 4);
+
+  curLineClear(buffer);
+  bufferHandleIncreaseCurY(buffer);
+}
+
+void bufferHandleEscapeSequence(){
   if(!isInputAvailable()) return;
   char c = editorReadKey();
   if(c!='[') return;
@@ -184,22 +297,15 @@ void handleEscapeSequence(struct editorBuffer *buffer){
       write(STDOUT_FILENO, "Arrow Down", 10);
       break;
     case 'C':
-      //TODO go to the next line if the last char of the line;
-      if(buffer->cur_line[buffer->cur_x]=='\0') break;
-      write(STDOUT_FILENO, "\x1b[1C", 4);
-      buffer->cur_x++;
       break;
     case 'D':
-      if(buffer->cur_x==0) break;
-      write(STDOUT_FILENO, "\x1b[1D", 4);
-      buffer->cur_x--;
       break;
     default:
       break;
   }
 }
 
-void editorProcessKeypress(struct editorBuffer *buffer)
+void editorProcessKeypress(struct TextBuffer *buffer)
   {
     char c = editorReadKey();
 
@@ -210,37 +316,30 @@ void editorProcessKeypress(struct editorBuffer *buffer)
           exit(0);
           break;
         case ('\r'):
-          bufferWriteChar(buffer, c);
-          bufferWriteChar(buffer, '\n');
-          writeCurrentLineToBuffer(buffer);
-          write(STDOUT_FILENO, "\x1b[1E", 4);
-          buffer->cur_x=0;
-          if(buffer->cur_y==buffer->numlines){
-            buffer->numlines++;
-          }
-          buffer->cur_y++;
+          bufferHandleEditorNextLine(buffer);
+          break;
+        case ('\n'):
+          bufferHandleEditorNextLine(buffer);
           break;
         case CTRL_KEY('p'):
-          editorRefreshScreen();
           editorOutputBufferText(buffer);
           break;
         case DEL:
-          if(buffer->cur_x==0) break;
-          deleteChar(buffer);
-          writeCurrentLineToBuffer(buffer);
+          curLineDeleteChar(buffer);
+          bufferWriteCurrentLine(buffer);
           break;
         case BACKSPACE:
-          if(buffer->cur_x==0) break;
-          deleteChar(buffer);
-          writeCurrentLineToBuffer(buffer);
+          curLineDeleteChar(buffer);
+          bufferWriteCurrentLine(buffer);
           break;
         case ('\x1b'):
-          handleEscapeSequence(buffer);
+          bufferHandleEscapeSequence();
           break;
         default:
           //Только при дефолте происходит реальная запись
-          bufferWriteChar(buffer, c);
-          write(STDOUT_FILENO, &c, 1);
+          curLineWriteChar(buffer, c);
+          bufferWriteCurrentLine(buffer);
+          editorRefreshScreen(buffer);
           break;
       }
 
@@ -250,12 +349,13 @@ void editorProcessKeypress(struct editorBuffer *buffer)
 //INIT
 int main(){
   enableRawMode();
-  editorRefreshScreen();
-  struct editorBuffer buffer = makeStringBuffer();
+  struct TextBuffer buffer = textBuffer();
+  ws = windowSettings();
+  cursor.y=ws.topOffset;
+  editorRefreshScreen(&buffer);
   while(1)
     {
       editorProcessKeypress(&buffer);
     }
-  editorRefreshScreen();
   return 0;
 }
