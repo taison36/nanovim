@@ -28,8 +28,8 @@ struct TextBuffer{
 };
 
 struct WindowSettings{
-  int terminalX;
-  int terminalY;
+  int terminalWidth;
+  int terminalHeight;
   int topOffset;
   int bottomOffset;
 };
@@ -37,6 +37,7 @@ struct WindowSettings{
 struct CursorCoordinates{
   int x;
   int y;
+  int wantedX;
 };
 
 
@@ -60,15 +61,15 @@ struct WindowSettings windowSettings(){
     exit(1);
   }
 
-  ws.terminalX = w.ws_col;
-  ws.terminalY = w.ws_row;
+  ws.terminalWidth = w.ws_col;
+  ws.terminalHeight = w.ws_row;
   ws.topOffset = 0;
   ws.bottomOffset = 0;
   return ws;
 }
 
 static struct WindowSettings ws;
-static struct CursorCoordinates cursor = {0,0};
+static struct CursorCoordinates cursor = {0,0,0};
 
 // TERMINAL
 void die(const char *s){
@@ -176,6 +177,54 @@ void cursorRefresh(){
   free(str);
 }
 
+int getScreenLinesForString(const char* str) {
+    int len = strlen(str);
+    return (len / ws.terminalWidth) + (len % ws.terminalWidth > 0 ? 1 : 0);
+}
+
+//cursor.y=1
+//cursor.x=5
+void cursorGoUp(struct TextBuffer *buffer){
+  int goUp = 0;
+  //check current buffer line
+  int maxX = ws.terminalWidth;
+  int curX = cursor.x; //
+  goUp+= curX/maxX;
+
+  //check next buffer line
+  //i assume that the buffer->lines[buffer->curX+1] is already put in the buffer of the curLine
+  if(buffer->curY == 0) return;
+  int lenLine = strlen(buffer->lines[buffer->curY-1]);
+  int targetX = lenLine<cursor.wantedX ? lenLine : curX;
+  int screenLines = getScreenLinesForString(buffer->lines[buffer->curY-1]);
+
+  goUp += screenLines - (targetX/maxX +1);
+
+  cursor.y+=goUp;
+  cursor.x=targetX;
+}
+
+void cursorGoDown(struct TextBuffer *buffer){
+  int goDown = 0;
+  //check current buffer line
+  int maxX = ws.terminalWidth;
+  int curX = cursor.x; //
+  int screenCurLines = getScreenLinesForString(buffer->curLine);
+  goUp+= curX/maxX;
+
+  //check next buffer line
+  //i assume that the buffer->lines[buffer->curX+1] is already put in the buffer of the curLine
+  if(buffer->curY == buffer->numlines) return;
+  int lenLine = strlen(buffer->curLine);
+  int targetX = lenLine<cursor.wantedX ? lenLine : curX;
+  int screenLines = getScreenLinesForString(buffer->curLine);
+
+  goUp += screenLines - (targetX/maxX +1);
+
+  cursor.y+=goUp;
+  cursor.x=targetX;
+}
+
 // OUTPUT
 //TODO Добавить логику, когда есть скроллинг. То есть показывать не buffer->lines[i], а со строки ниже где находишься
 char* editorPrepareBufferForScreen(struct TextBuffer *buffer) {
@@ -184,8 +233,8 @@ char* editorPrepareBufferForScreen(struct TextBuffer *buffer) {
     if (!screenBuffer) die("editorPrepareBufferForScreen: malloc failed");
     int appended = 0;
 
-    int maxX = ws.terminalX;
-    int maxY = ws.terminalY - (ws.bottomOffset + ws.topOffset);
+    int maxX = ws.terminalWidth;
+    int maxY = ws.terminalHeight - (ws.bottomOffset + ws.topOffset);
     int shownY = 0;
 
     for (int i = 0; i <= buffer->numlines && shownY < maxY; i++) {
