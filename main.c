@@ -104,6 +104,13 @@ void dbgPrint(char *s){
   sleep(1);
 }
 
+void printInt(int x) {
+  char buf[32];
+  int len = snprintf(buf, sizeof(buf), "%d\n", x);
+  write(STDOUT_FILENO, buf, len);
+  sleep(1);
+}
+
 void copyLine(char *to, char *from) {
   while (*from != '\0') {
     *to++ = *from++;
@@ -137,6 +144,38 @@ void moveCharsLeft(char *str, int cur_pos, int n) {
         str[i - n] = str[i]; 
     }
 }
+
+char* makeStringFromInt(int n){
+  char* str = malloc(12);
+  if(!str) die("makeStringFromInt: malloc failed");
+  snprintf(str,12, "%d", n);
+  return str;
+}
+
+//CURSOR
+void cursorRefresh(){
+  char* x = makeStringFromInt(cursor.x);
+  char* y = makeStringFromInt(cursor.y);
+  int len =5+strlen(x) + strlen(y);
+  char* str = malloc(len);
+
+  if(!str){
+    die("cursorPut: malloc failed");
+  }
+
+  strcpy(str, "\x1b[");
+  strcat(str, x);
+  strcat(str, ";");
+  strcat(str, y);
+  strcat(str, "H");
+
+  write(STDOUT_FILENO, str, strlen(str));
+
+  free(y);
+  free(x);
+  free(str);
+}
+
 // OUTPUT
 //TODO Добавить логику, когда есть скроллинг. То есть показывать не buffer->lines[i], а со строки ниже где находишься
 char* editorPrepareBufferForScreen(struct TextBuffer *buffer) {
@@ -201,6 +240,10 @@ void editorRefreshScreen(struct TextBuffer *buffer) {
 }
 
 void editorOutputBufferText(struct TextBuffer *buffer) {
+  //clear the terminal
+  write(STDOUT_FILENO, "\x1b[2J", 4);
+  //put cursor to the top
+  write(STDOUT_FILENO, "\x1b[H", 3);
   for (int i = 0; i < buffer->numlines; i++) {
     char *str = buffer->lines[i];
     while (*str != '\0') {
@@ -216,7 +259,7 @@ void editorOutputBufferText(struct TextBuffer *buffer) {
 void curLineDeleteChar(struct TextBuffer *buffer){
   if(buffer->curX==0) return;
   moveCharsLeft(buffer->curLine, buffer->curX, 1);
-  write(STDOUT_FILENO, "\x1b[P", 3);
+  buffer->curX--;
 }
 
 
@@ -276,8 +319,6 @@ void bufferHandleEditorNextLine(struct TextBuffer *buffer){
   curLineWriteChar(buffer, '\r');
   curLineWriteChar(buffer, '\n');
   bufferWriteCurrentLine(buffer);
-
-  write(STDOUT_FILENO, "\x1b[1E", 4);
 
   curLineClear(buffer);
   bufferHandleIncreaseCurY(buffer);
@@ -339,10 +380,10 @@ void editorProcessKeypress(struct TextBuffer *buffer)
           //Только при дефолте происходит реальная запись
           curLineWriteChar(buffer, c);
           bufferWriteCurrentLine(buffer);
-          editorRefreshScreen(buffer);
           break;
       }
 
+    editorRefreshScreen(buffer);
   }
 
 
