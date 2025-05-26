@@ -69,7 +69,7 @@ struct WindowSettings windowSettings(){
 }
 
 static struct WindowSettings ws;
-static struct CursorCoordinates cursor = {0,0,0};
+static struct CursorCoordinates cursor = {1,1,1};
 
 // TERMINAL
 void die(const char *s){
@@ -165,12 +165,12 @@ void cursorRefresh(){
   }
 
   strcpy(str, "\x1b[");
-  strcat(str, x);
-  strcat(str, ";");
   strcat(str, y);
+  strcat(str, ";");
+  strcat(str, x);
   strcat(str, "H");
 
-  write(STDOUT_FILENO, str, strlen(str));
+  write(STDOUT_FILENO, str, len);
 
   free(y);
   free(x);
@@ -178,51 +178,78 @@ void cursorRefresh(){
 }
 
 int getScreenLinesForString(const char* str) {
-    int len = strlen(str);
-    return (len / ws.terminalWidth) + (len % ws.terminalWidth > 0 ? 1 : 0);
+  int len = strlen(str);
+  if (len >= 2 && str[len - 2] == '\r' && str[len - 1] == '\n') len -= 2;
+  return (len / ws.terminalWidth) + (len % ws.terminalWidth > 0 ? 1 : 0);
 }
 
-//cursor.y=1
-//cursor.x=5
-void cursorGoUp(struct TextBuffer *buffer){
+void cursorGoUp(struct TextBuffer *buffer) {
   int goUp = 0;
-  //check current buffer line
   int maxX = ws.terminalWidth;
-  int curX = cursor.x; //
-  goUp+= curX/maxX;
 
-  //check next buffer line
-  //i assume that the buffer->lines[buffer->curX+1] is already put in the buffer of the curLine
-  if(buffer->curY == 0) return;
-  int lenLine = strlen(buffer->lines[buffer->curY-1]);
-  int targetX = lenLine<cursor.wantedX ? lenLine : curX;
-  int screenLines = getScreenLinesForString(buffer->lines[buffer->curY-1]);
+  // учёт текущей строки (строка ниже по экрану)
+  goUp += cursor.x / maxX;
 
-  goUp += screenLines - (targetX/maxX +1);
+  // если на самой верхней строке — выход
+  if (buffer->curY == 0) return;
 
-  cursor.y+=goUp;
-  cursor.x=targetX;
+  // получаем предыдущую строку
+  char *prevLine = buffer->lines[buffer->curY - 1];
+  int lenLine = strlen(prevLine);
+
+  // исключаем \r\n из длины
+  if (lenLine >= 2 && prevLine[lenLine - 2] == '\r' && prevLine[lenLine - 1] == '\n') {
+    lenLine -= 2;
+  }
+
+  int targetX = lenLine < cursor.wantedX ? lenLine : cursor.wantedX;
+  int screenLines = getScreenLinesForString(prevLine); // можно тоже обрезать здесь, если нужно
+
+  goUp += screenLines - (targetX / maxX);
+
+  cursor.y -= goUp;
+  cursor.x = targetX;
 }
 
-void cursorGoDown(struct TextBuffer *buffer){
+void cursorGoDown(struct TextBuffer *buffer) {
   int goDown = 0;
-  //check current buffer line
   int maxX = ws.terminalWidth;
-  int curX = cursor.x; //
-  int screenCurLines = getScreenLinesForString(buffer->curLine);
-  goUp+= curX/maxX;
 
-  //check next buffer line
-  //i assume that the buffer->lines[buffer->curX+1] is already put in the buffer of the curLine
-  if(buffer->curY == buffer->numlines) return;
-  int lenLine = strlen(buffer->curLine);
-  int targetX = lenLine<cursor.wantedX ? lenLine : curX;
-  int screenLines = getScreenLinesForString(buffer->curLine);
+  // учёт текущей строки
+  int screenLinesOfCurLine = getScreenLinesForString(buffer->curLine);
+  int curYPosition = cursor.x/maxX + (cursor.x%maxX>0 ? 1 : 0);
+  goDown += screenLinesOfCurLine - curYPosition;
 
-  goUp += screenLines - (targetX/maxX +1);
+  if (buffer->curY >= buffer->numlines || buffer->lines[buffer->curY] == NULL) {
+    goDown += 1;
+    cursor.x = 1;
+  } else {
+    char *nextLine = buffer->lines[buffer->curY];
+    int lenLine = strlen(nextLine);
 
-  cursor.y+=goUp;
-  cursor.x=targetX;
+    // исключаем \r\n из длины
+    if (lenLine >= 2 && nextLine[lenLine - 2] == '\r' && nextLine[lenLine - 1] == '\n') {
+      lenLine -= 2;
+    }
+
+    int targetX = lenLine < cursor.wantedX ? lenLine : cursor.wantedX;
+    int screenLines = getScreenLinesForString(nextLine); // можно тоже обрезать здесь, если нужно
+
+    goDown += screenLines - (targetX / maxX);
+    cursor.x = targetX;
+  }
+
+  cursor.y += goDown;
+}
+
+void cursorGoRight(struct TextBuffer *buffer){
+  int len = strlen(buffer->curLine);
+  // Только если курсор не в конце строки
+  if (cursor.x <= len) {
+    cursor.x++;
+  }
+
+  cursor.wantedX=cursor.x;
 }
 
 // OUTPUT
@@ -273,7 +300,7 @@ char* editorPrepareBufferForScreen(struct TextBuffer *buffer) {
 
 void editorRefreshScreen(struct TextBuffer *buffer) {
   //save cursor pos
-  write(STDOUT_FILENO, "\x1b[s", 3);
+  //write(STDOUT_FILENO, "\x1b[s", 3);
 
   //clear the terminal
   write(STDOUT_FILENO, "\x1b[2J", 4);
@@ -285,10 +312,13 @@ void editorRefreshScreen(struct TextBuffer *buffer) {
   write(STDOUT_FILENO, screenBuffer, strlen(screenBuffer));
 
   //put the cursor back
-  write(STDOUT_FILENO, "\x1b[u", 3);
+  //write(STDOUT_FILENO, "\x1b[u", 3);
+  free(screenBuffer);
 }
 
 void editorOutputBufferText(struct TextBuffer *buffer) {
+  write(STDOUT_FILENO, "p pressed!", 10);
+  sleep(1);
   //clear the terminal
   write(STDOUT_FILENO, "\x1b[2J", 4);
   //put cursor to the top
@@ -305,6 +335,10 @@ void editorOutputBufferText(struct TextBuffer *buffer) {
 
 //INPUT
 
+void bufferPutCurLine(struct TextBuffer *buffer){
+  copyLine(buffer->curLine, buffer->lines[buffer->curY]);
+}
+
 void curLineDeleteChar(struct TextBuffer *buffer){
   if(buffer->curX==0) return;
   moveCharsLeft(buffer->curLine, buffer->curX, 1);
@@ -316,7 +350,7 @@ void bufferWriteCurrentLine(struct TextBuffer *buffer){
   int size = strlen(buffer->curLine);
 
   if(buffer->lines[buffer->curY] != NULL) free(buffer->lines[buffer->curY]);
-  buffer->lines[buffer->curY] = malloc(size);
+  buffer->lines[buffer->curY] = malloc(size+1);
 
   if (buffer->lines[buffer->curY] == NULL) {
     die("writeCurrentLineToBuffer: malloc failed");
@@ -369,11 +403,12 @@ void bufferHandleEditorNextLine(struct TextBuffer *buffer){
   curLineWriteChar(buffer, '\n');
   bufferWriteCurrentLine(buffer);
 
-  curLineClear(buffer);
   bufferHandleIncreaseCurY(buffer);
+  cursorGoDown(buffer);
+  curLineClear(buffer);
 }
 
-void bufferHandleEscapeSequence(){
+void bufferHandleEscapeSequence(struct TextBuffer *buffer){
   if(!isInputAvailable()) return;
   char c = editorReadKey();
   if(c!='[') return;
@@ -381,12 +416,19 @@ void bufferHandleEscapeSequence(){
   c = editorReadKey();
   switch (c) {
     case 'A':
-      write(STDOUT_FILENO, "Arrow Up", 8);
+      if(buffer->curY == 0) return;
+      cursorGoUp(buffer);
+      buffer->curY--;
+      bufferPutCurLine(buffer);
       break;
     case 'B':
-      write(STDOUT_FILENO, "Arrow Down", 10);
+      if(buffer->curY == buffer->numlines) return;
+      cursorGoDown(buffer);
+      buffer->curY++;
+      bufferPutCurLine(buffer);
       break;
     case 'C':
+      cursorGoRight(buffer);
       break;
     case 'D':
       break;
@@ -423,16 +465,17 @@ void editorProcessKeypress(struct TextBuffer *buffer)
           bufferWriteCurrentLine(buffer);
           break;
         case ('\x1b'):
-          bufferHandleEscapeSequence();
+          bufferHandleEscapeSequence(buffer);
           break;
         default:
           //Только при дефолте происходит реальная запись
           curLineWriteChar(buffer, c);
           bufferWriteCurrentLine(buffer);
+          cursorGoRight(buffer);
           break;
       }
-
     editorRefreshScreen(buffer);
+    cursorRefresh();
   }
 
 
@@ -441,7 +484,7 @@ int main(){
   enableRawMode();
   struct TextBuffer buffer = textBuffer();
   ws = windowSettings();
-  cursor.y=ws.topOffset;
+  cursor.y=ws.topOffset+1;
   editorRefreshScreen(&buffer);
   while(1)
     {
