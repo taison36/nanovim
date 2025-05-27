@@ -505,17 +505,17 @@ void curLineDeleteChar(struct TextBuffer *buffer, struct CursorCoordinates *curs
     if(len_prev_str >= 2 && prev_str[len_prev_str-2] == '\r' && prev_str[len_prev_str-1] == '\n'){
       prev_str[len_prev_str-2] = '\0';
       len_prev_str-=2;
-    }else{
+    }else if(len_prev_str >= 1 && prev_str[len_prev_str-1] == '\n'){
       prev_str[len_prev_str-1] = '\0';
       len_prev_str-=1;
     }
 
-    char* appended_line = appendTwoLines(buffer->lines[buffer->curY-1], buffer->lines[buffer->curY]);
+    char* appended_line = appendTwoLines(prev_str, buffer->lines[buffer->curY]);
     if(appended_line==NULL){
       die("curLineDeleteChar: appending of two lines is failed");
     }
 
-    free(buffer->lines[buffer->curY]); // ЧТО-ТО неправильно сдвинул
+    free(buffer->lines[buffer->curY]);
     moveRowsUp(buffer->lines, buffer->numlines, buffer->curY);
     //free(buffer->lines[buffer->curY-1]);
 
@@ -643,8 +643,17 @@ void editorProcessKeypress(struct TextBuffer *buffer, struct WindowSettings *ws,
           if (buffer->curY == buffer->numlines) {
             buffer->numlines++;
           }
-          curLineWriteChar(buffer, '\r');
-          curLineWriteChar(buffer, '\n');
+          // check if this has already rn;
+          size_t len = strlen(buffer->curLine);
+          char* curLine = buffer->curLine;
+          if( ! (len >= 2 && curLine[len-2] == '\r' && curLine[len-1] == '\n')){
+            curLineWriteChar(buffer, '\r');
+            curLineWriteChar(buffer, '\n');
+          }else if( ! (len >= 1 && curLine[len-1] == '\n')){
+            curLineWriteChar(buffer, '\r');
+            curLineWriteChar(buffer, '\n');
+          }
+
           bufferSaveCurrentLine(buffer);
           curLineClearAndResetX(buffer);
           buffer->curY++;
