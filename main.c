@@ -230,14 +230,12 @@ void moveCursorRight(struct TextBuffer *buffer) {
         stringLength -=1;
     }
 
-    if (buffer->curX < stringLength) {
+    if (buffer->curX < stringLength-1) {
       // Cursor is not at the end of the text on the current line
       buffer->curX++;
     } else if (buffer->curY < buffer->numlines) {
         bufferWriteCurrentLine(buffer);
-        buffer->curY++;
-        bufferLoadCurLine(buffer);
-        buffer->curX = 0;
+        moveCursorDown(buffer);
     }
     cursor.logicalWantedX = buffer->curX;
 }
@@ -269,7 +267,7 @@ void moveCursorUp(struct TextBuffer *buffer) {
         if (lineLen >= 2 && buffer->curLine[lineLen - 2] == '\r' && buffer->curLine[lineLen - 1] == '\n') {
             lineLen -= 2;
         } else if (lineLen >= 1 && (buffer->curLine[lineLen - 1] == '\r' || buffer->curLine[lineLen - 1] == '\n')) {
-            lineLen -=1;
+          lineLen -=1;
         }
         buffer->curX = MIN(lineLen, cursor.logicalWantedX);
     }
