@@ -315,7 +315,7 @@ void moveRowsUp(char **lines,int num_lines, int row_to_delete){
   // so cur_row disappears
   if(lines==NULL || row_to_delete < 0) return;
 
-  for(int i = row_to_delete; i<=num_lines; i++){
+  for(int i = row_to_delete; i<num_lines; i++){
     lines[i] = lines[i+1];
   }
 }
@@ -616,7 +616,6 @@ void curLineDeleteChar(struct TextBuffer *buffer, struct CursorCoordinates *curs
 
     free(buffer->lines[buffer->curY]);
     moveRowsUp(buffer->lines, buffer->numlines, buffer->curY);
-    //free(buffer->lines[buffer->curY-1]);
 
     buffer->curY--;
     curLineClearAndResetX(buffer);
@@ -694,7 +693,7 @@ void curLineWriteChars(struct TextBuffer *buffer, const char* chars) {
     }
 
     memcpy(&buffer->curLine[buffer->curX], chars, add_len);
-
+    buffer->curLine[current_len+add_len] = '\0';
     buffer->curX += add_len;
 }
 
@@ -704,28 +703,33 @@ void curLineClearAndResetX(struct TextBuffer *buffer){
 }
 
 void bufferHandleNewLineInput(struct TextBuffer *buffer, struct CursorCoordinates *cursor){
-  int cur_line_len = strlen(buffer->curLine);
-  cur_line_len = cur_line_len - countNewLineChars(buffer->curLine);
+  int cur_line_len = strlen(buffer->curLine) - countNewLineChars(buffer->curLine);
 
   if(buffer->curX == cur_line_len){
 
-    if(buffer->curY == buffer->numlines){
-      buffer->numlines++;
-    }
+    // when i press enter i basically add a new line beetwen current and next line. so i need to append \r\n to the current line,
+    // create a new line \r\n\0
+    // make space
+    // put the new line:w
 
-    // check if the curLine has already \r\n;
-    char* curLine = buffer->curLine;
-    if(countNewLineChars(curLine) < 2){
-      curLineWriteChar(buffer, '\r');
-      curLineWriteChar(buffer, '\n');
+    if(countNewLineChars(buffer->curLine) == 0){
+      if (strlen(buffer->curLine) + 2 < SIZELINE) {
+        strcat(buffer->curLine, "\r\n");
+      }
     }
 
     bufferSaveCurrentLine(buffer);
+
+    editorEnsureLineCapacity(buffer, buffer->numlines + 1);
+    moveRowsDown(buffer->lines, buffer->curY + 1, &buffer->numlines);
+
+    buffer->curY++;
 
     curLineClearAndResetX(buffer);
-    buffer->curY++;
+
     bufferSaveCurrentLine(buffer);
-    cursor->logicalWantedX=buffer->curX;
+
+    cursor->logicalWantedX = buffer->curX;
   }else{
     editorEnsureLineCapacity(buffer, buffer->numlines + 1);
 
