@@ -26,15 +26,20 @@ void bufferLoadCurLine(struct TextBuffer *buffer);
 void curLineClearAndResetX(struct TextBuffer *buffer);
 void curLineWriteChar(struct TextBuffer *buffer, char c);
 void bufferSaveCurrentLine(struct TextBuffer *buffer);
-void updateScreenCursorCoordinates(struct TextBuffer *buffer, struct WindowSettings *ws, struct CursorCoordinates *cursor);
+void editorUpdateCursorCoordinates(struct TextBuffer *buffer, struct WindowSettings *ws, struct CursorCoordinates *cursor);
 void editorRefreshScreen(struct TextBuffer *buffer, struct WindowSettings *ws);
-void cursorRefresh(struct CursorCoordinates *cursor);
+void editorRefreshCursor(struct CursorCoordinates *cursor);
 void freeTextBuffer(struct TextBuffer *buffer);
 void moveCursorDown(struct TextBuffer *buffer, struct CursorCoordinates *cursor);
 void die(const char *s);
 void cleanEditor();
 void curLineWriteChars(struct TextBuffer *buffer,const char* chars);
+void bufferHandleNewLineInput(struct TextBuffer *buffer, struct CursorCoordinates *cursor);
+int countNewLineChars(const char *str);
+void editorEnsureLineCapacity(struct TextBuffer *buffer, int required_idx);
+char* addNewLineChar(char *str);
 
+//INIT
 struct TextBuffer {
     char **lines;
     int numlines;
@@ -125,6 +130,99 @@ void enableRawMode(){
 }
 
 //HELPER
+char* addNewLineChar(char *str) {
+    if (str == NULL) {
+        return NULL; // Return NULL if input is NULL.
+    }
+
+    size_t str_len = strlen(str);
+
+    // Use a temporary pointer to avoid the realloc pitfall.
+    char *temp = realloc(str, str_len + 3); // +2 for \r\n, +1 for \0
+    if (temp == NULL) {
+        die("addNewLineChar: realloc failed");
+    }
+
+    // Now it's safe to update the pointer.
+    str = temp;
+
+    // Append the newline characters.
+    str[str_len] = '\r';
+    str[str_len + 1] = '\n';
+    str[str_len + 2] = '\0';
+    return str;
+}
+
+
+char** splitLine(const char *str, size_t n) {
+  if (str == NULL) {
+    return NULL;
+  }
+
+  size_t str_len = strlen(str);
+  if (n > str_len) {
+      return NULL;
+  }
+
+  char **res = malloc(2 * sizeof(*res));
+  if (res == NULL) {
+      die("splitLine: failed malloc");
+  }
+
+
+  size_t second_part_len = str_len - n;
+
+  res[0] = malloc(n + 1);
+  res[1] = malloc(second_part_len + 1);
+
+  if (res[0] == NULL || res[1] == NULL) {
+      free(res[0]);
+      free(res[1]);
+      free(res);
+      die("splitLine: failed to allocate memory for a string");
+  }
+
+  memcpy(res[0], str, n);
+  res[0][n] = '\0';
+
+  memcpy(res[1], str + n, second_part_len);
+  res[1][second_part_len] = '\0';
+
+  return res;
+}
+
+void moveRowsDown(char **lines, int row_to_move, int *num_lines){
+  if(lines==NULL || row_to_move < 0) return;
+
+  for (int i = *num_lines; i > row_to_move; i--) {
+    lines[i] = lines[i - 1];
+  }
+
+  (*num_lines)++;
+
+  lines[row_to_move] = NULL;
+}
+
+int countNewLineChars(const char *str) {
+    if (str == NULL) {
+        return 0;
+    }
+
+    size_t len = strlen(str);
+
+    if (len >= 2 && str[len - 2] == '\r' && str[len - 1] == '\n') {
+        return 2;
+    }
+    else if (len >= 1 && str[len - 1] == '\n') {
+        return 1;
+    }
+    else if (len >= 1 && str[len - 1] == '\r') {
+        return 1;
+    }
+
+    return 0;
+}
+
 void cleanEditor(){
   if(global_buffer_initialized){
     freeTextBuffer(&global_buffer_for_cleanup);
@@ -269,7 +367,7 @@ void editorEnsureLineCapacity(struct TextBuffer *buffer, int required_idx) {
 }
 
 //CURSOR
-void updateScreenCursorCoordinates(struct TextBuffer *buffer,  struct WindowSettings *ws, struct CursorCoordinates *cursor){
+void editorUpdateCursorCoordinates(struct TextBuffer *buffer,  struct WindowSettings *ws, struct CursorCoordinates *cursor){
     cursor->screenY = ws->topOffset + 1;
 
     for (int i = 0; i < buffer->curY; i++) {
@@ -288,7 +386,7 @@ void updateScreenCursorCoordinates(struct TextBuffer *buffer,  struct WindowSett
     }
 }
 
-void cursorRefresh(struct CursorCoordinates *cursor){
+void editorRefreshCursor(struct CursorCoordinates *cursor){
   char* x = makeStringFromInt(cursor->screenX);
   char* y = makeStringFromInt(cursor->screenY);
   int len = 5 + strlen(x) + strlen(y);
@@ -511,6 +609,7 @@ void curLineDeleteChar(struct TextBuffer *buffer, struct CursorCoordinates *curs
     }
 
     char* appended_line = appendTwoLines(prev_str, buffer->lines[buffer->curY]);
+
     if(appended_line==NULL){
       die("curLineDeleteChar: appending of two lines is failed");
     }
@@ -550,7 +649,6 @@ void bufferSaveCurrentLine(struct TextBuffer *buffer){
     die("writeCurrentLineToBuffer: malloc failed");
   }
   copyLine(buffer->curLine, buffer->lines[buffer->curY]);
-  //TODO if its not the last line of the file, we need to move the rest of the lines in the buffer to be able to make the space
 }
 
 char editorReadKey(){
@@ -605,7 +703,65 @@ void curLineClearAndResetX(struct TextBuffer *buffer){
   buffer->curLine[buffer->curX] = '\0'; // clear current line;
 }
 
+void bufferHandleNewLineInput(struct TextBuffer *buffer, struct CursorCoordinates *cursor){
+  int cur_line_len = strlen(buffer->curLine);
+  cur_line_len = cur_line_len - countNewLineChars(buffer->curLine);
 
+  if(buffer->curX == cur_line_len){
+
+    if(buffer->curY == buffer->numlines){
+      buffer->numlines++;
+    }
+
+    // check if the curLine has already \r\n;
+    char* curLine = buffer->curLine;
+    if(countNewLineChars(curLine) < 2){
+      curLineWriteChar(buffer, '\r');
+      curLineWriteChar(buffer, '\n');
+    }
+
+    bufferSaveCurrentLine(buffer);
+
+    curLineClearAndResetX(buffer);
+    buffer->curY++;
+    bufferSaveCurrentLine(buffer);
+    cursor->logicalWantedX=buffer->curX;
+  }else{
+    editorEnsureLineCapacity(buffer, buffer->numlines + 1);
+
+    char **splitted_lines = splitLine(buffer->curLine, buffer->curX);
+    if (splitted_lines == NULL) {
+        return;
+    }
+
+    char *first_half = splitted_lines[0];
+    char *second_half = splitted_lines[1];
+
+    moveRowsDown(buffer->lines, buffer->curY+1, &buffer->numlines);
+
+    curLineClearAndResetX(buffer);
+
+    first_half = addNewLineChar(first_half);
+    if (first_half == NULL){
+      die("bufferHandleNewLineInput: malloc failed -> first_half var");
+    }
+
+    curLineWriteChars(buffer, first_half);
+    bufferSaveCurrentLine(buffer);
+
+    buffer->curY++;
+    curLineClearAndResetX(buffer);
+    curLineWriteChars(buffer, second_half);
+    bufferSaveCurrentLine(buffer);
+
+    buffer->curX = 0;
+    cursor->logicalWantedX = 0;
+
+    free(first_half);
+    free(second_half);
+    free(splitted_lines);
+  }
+}
 void bufferHandleEscapeSequence(struct TextBuffer *buffer, struct CursorCoordinates *cursor){
   if(!isInputAvailable()) return;
   char c = editorReadKey();
@@ -616,8 +772,7 @@ void bufferHandleEscapeSequence(struct TextBuffer *buffer, struct CursorCoordina
     case 'A':
       moveCursorUp(buffer, cursor);
       break;
-    case 'B':
-      moveCursorDown(buffer, cursor);
+    case 'B': moveCursorDown(buffer, cursor);
       break;
     case 'C':
       moveCursorRight(buffer, cursor);
@@ -640,24 +795,7 @@ void editorProcessKeypress(struct TextBuffer *buffer, struct WindowSettings *ws,
           break;
         case ('\r'):
         case ('\n'):
-          if (buffer->curY == buffer->numlines) {
-            buffer->numlines++;
-          }
-          // check if this has already rn;
-          size_t len = strlen(buffer->curLine);
-          char* curLine = buffer->curLine;
-          if( ! (len >= 2 && curLine[len-2] == '\r' && curLine[len-1] == '\n')){
-            curLineWriteChar(buffer, '\r');
-            curLineWriteChar(buffer, '\n');
-          }else if( ! (len >= 1 && curLine[len-1] == '\n')){
-            curLineWriteChar(buffer, '\r');
-            curLineWriteChar(buffer, '\n');
-          }
-
-          bufferSaveCurrentLine(buffer);
-          curLineClearAndResetX(buffer);
-          buffer->curY++;
-          cursor->logicalWantedX=buffer->curX;
+          bufferHandleNewLineInput(buffer, cursor);
           break;
         case CTRL_KEY('p'):
           editorOutputBufferText(buffer);
@@ -681,8 +819,8 @@ void editorProcessKeypress(struct TextBuffer *buffer, struct WindowSettings *ws,
       }
 
     editorRefreshScreen(buffer, ws);
-    updateScreenCursorCoordinates(buffer, ws, cursor);
-    cursorRefresh(cursor);
+    editorUpdateCursorCoordinates(buffer, ws, cursor);
+    editorRefreshCursor(cursor);
   }
 
 
