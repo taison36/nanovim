@@ -703,34 +703,6 @@ void curLineClearAndResetX(struct TextBuffer *buffer){
 }
 
 void bufferHandleNewLineInput(struct TextBuffer *buffer, struct CursorCoordinates *cursor){
-  int cur_line_len = strlen(buffer->curLine) - countNewLineChars(buffer->curLine);
-
-  if(buffer->curX == cur_line_len){
-
-    // when i press enter i basically add a new line beetwen current and next line. so i need to append \r\n to the current line,
-    // create a new line \r\n\0
-    // make space
-    // put the new line:w
-
-    if(countNewLineChars(buffer->curLine) == 0){
-      if (strlen(buffer->curLine) + 2 < SIZELINE) {
-        strcat(buffer->curLine, "\r\n");
-      }
-    }
-
-    bufferSaveCurrentLine(buffer);
-
-    editorEnsureLineCapacity(buffer, buffer->numlines + 1);
-    moveRowsDown(buffer->lines, buffer->curY + 1, &buffer->numlines);
-
-    buffer->curY++;
-
-    curLineClearAndResetX(buffer);
-
-    bufferSaveCurrentLine(buffer);
-
-    cursor->logicalWantedX = buffer->curX;
-  }else{
     editorEnsureLineCapacity(buffer, buffer->numlines + 1);
 
     char **splitted_lines = splitLine(buffer->curLine, buffer->curX);
@@ -764,8 +736,8 @@ void bufferHandleNewLineInput(struct TextBuffer *buffer, struct CursorCoordinate
     free(first_half);
     free(second_half);
     free(splitted_lines);
-  }
 }
+
 void bufferHandleEscapeSequence(struct TextBuffer *buffer, struct CursorCoordinates *cursor){
   if(!isInputAvailable()) return;
   char c = editorReadKey();
