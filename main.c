@@ -26,6 +26,8 @@ struct ScreenSettings;
 struct TextBuffer;
 struct VisualCache;
 void bufferLoadCurLine(struct TextBuffer *buffer);
+void addLineVisualCache(struct VisualCache *visual_cache, struct WindowSettings *ws, int cur_y,
+                           char *line);
 void curLineClearAndResetX(struct TextBuffer *buffer);
 void curLineWriteChar(struct TextBuffer *buffer, char c);
 void bufferSaveCurrentLine(struct TextBuffer *buffer);
@@ -124,7 +126,7 @@ struct WindowSettings windowSettingsInit() {
   struct WindowSettings ws;
 
   ws.top_offset = 0;
-  ws.bottom_offset = 0; // NOTE for status bar later
+  ws.bottom_offset = 1; // NOTE for status bar later
   ws.left_offset = 0;
 
  struct winsize w;
@@ -133,8 +135,8 @@ struct WindowSettings windowSettingsInit() {
  }
  ws.screen_width = w.ws_col - ws.left_offset;
  ws.screen_height = w.ws_row - (ws.bottom_offset + ws.top_offset);
- // ws.screen_width = 20 - ws.left_offset;
- // ws.screen_height = 5 - (ws.bottom_offset + ws.top_offset);
+//  ws.screen_width = 64 - ws.left_offset;
+// ws.screen_height = 29 - (ws.bottom_offset + ws.top_offset);
   return ws;
 }
 
@@ -424,8 +426,7 @@ int getScreenLinesForString(const char *str, struct WindowSettings *ws) {
   if (ws->screen_width == 0){
     return 1;
   }
-  return (stringLength / ws->screen_width) +
-         ((stringLength % ws->screen_width != 0) ? 1 : 0);
+  return (stringLength / ws->screen_width) + ((stringLength % ws->screen_width != 0) ? 1 : 0);
 }
 
 // DYNAMIC ARRAY MANAGEMENT for buffer->lines
@@ -454,11 +455,11 @@ void editorUpdateCursorCoordinates(struct TextBuffer *buffer,
                                    struct VisualCache *visual_cache) {
   calculate_screenY_and_first_printline(buffer, screen_settings, ws, visual_cache);
 
-  int y = 1;
+  int y = 0;
   for (int i = screen_settings->first_printline; i < buffer->cur_y; i++) {
     y += visual_cache->lines_screen_height[i];
   }
-  y += (ws->screen_width > 0) ? (buffer->cur_x / ws->screen_width) : 0;
+  y += (ws->screen_width > 0) ? (buffer->cur_x / ws->screen_width) + 1 : 0;
 
   screen_settings->cursor_y = y;
   screen_settings->cursor_x = (ws->screen_width > 0)
@@ -574,6 +575,7 @@ void moveCursorDown(struct TextBuffer *buffer,
       buffer->cur_y++;
       curLineClearAndResetX(buffer);
       bufferSaveCurrentLine(buffer);
+      addLineVisualCache(visual_cache, ws, buffer->cur_y, buffer->cur_line);
     } else {
       buffer->cur_y++;
       bufferLoadCurLine(buffer);
@@ -600,7 +602,7 @@ void calculate_screenY_and_first_printline(struct TextBuffer *buffer,
   build_prefix_sum(vc);
 
   int y = buffer->cur_y;
-  int line_end_y = vc->prefix_sum_line_heights[y + 1];
+  int line_end_y = vc->prefix_sum_line_heights[y] + vc->lines_screen_height[y];
   int line_height = vc->lines_screen_height[y];
 
   int first = screen_settings->first_printline;
@@ -666,7 +668,7 @@ char *editorPrepareBufferForScreen(struct TextBuffer *buffer,
   int appended = 0;
   int shownY = 0;
 
-  for (int i = screen_settings->first_printline; i < buffer->lines_num && shownY < ws->screen_height; i++) { // NOTE i am going from the FIRST line to the last
+  for (int i = screen_settings->first_printline; i <= buffer->lines_num && shownY < ws->screen_height; i++) { // NOTE i am going from the FIRST line to the last
     screenBufferWriteLine(buffer->lines[i], &shownY, ws, &appended, &size, &screenBuffer);
   }
 
@@ -705,6 +707,110 @@ void editorOutputBufferText(struct TextBuffer *buffer) {
   sleep(1);
 }
 
+static void debug_printf(const char *format, ...) {
+    char buffer[1024]; // Reasonably sized buffer for debug lines
+    va_list args;
+    va_start(args, format);
+    int len = vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+
+    if (len > 0) {
+        write(STDOUT_FILENO, buffer, (len < (int) sizeof(buffer)) ? len : sizeof(buffer) -1 );
+    }
+    write(STDOUT_FILENO, "\x1b[1G", 7);
+}
+
+void editorOutputInfo(struct TextBuffer *buffer, struct ScreenSettings *screen_settings, struct WindowSettings *ws, struct VisualCache *visual_cache) {
+    // Clear screen and move cursor to home for debug output visibility
+    write(STDOUT_FILENO, "\x1b[H\x1b[2J", 7);
+
+    debug_printf("--- Debug Info Start ---\n\n");
+
+    // TextBuffer Info
+    debug_printf("TextBuffer (at %p):\n", (void*)buffer);
+    if (buffer) {
+        debug_printf("  lines: %p\n", (void*)buffer->lines);
+        debug_printf("  lines_num: %d\n", buffer->lines_num);
+        debug_printf("  lines_capacity: %d\n", buffer->lines_capacity);
+        debug_printf("  cur_x: %d\n", buffer->cur_x);
+        debug_printf("  cur_y: %d\n", buffer->cur_y);
+        // Truncate cur_line display if it's very long, ensuring null termination for snprintf
+        char temp_cur_line[101]; // Display up to 100 chars of cur_line
+        strncpy(temp_cur_line, buffer->cur_line, 100);
+        temp_cur_line[100] = '\0';
+        debug_printf("  cur_line (first 100): \"%s\"\n", temp_cur_line);
+
+        debug_printf("  First %d lines content (if available):\n", 5);
+        for (int i = 0; i < buffer->lines_num && i < 5; ++i) {
+            if (buffer->lines[i]) {
+                 // Truncate line display if it's very long
+                char temp_line_content[101];
+                strncpy(temp_line_content, buffer->lines[i], 100);
+                temp_line_content[100] = '\0';
+                debug_printf("    lines[%d]: \"%s\"\n", i, temp_line_content);
+            } else {
+                debug_printf("    lines[%d]: (null)\n", i);
+            }
+        }
+    } else {
+        debug_printf("  TextBuffer is NULL\n");
+    }
+    debug_printf("\n");
+
+    // WindowSettings Info
+    debug_printf("WindowSettings (at %p):\n", (void*)ws);
+    if (ws) {
+        debug_printf("  top_offset: %d\n", ws->top_offset);
+        debug_printf("  bottom_offset: %d\n", ws->bottom_offset);
+        debug_printf("  left_offset: %d\n", ws->left_offset);
+        debug_printf("  screen_width: %d\n", ws->screen_width);
+        debug_printf("  screen_height: %d\n", ws->screen_height);
+    } else {
+        debug_printf("  WindowSettings is NULL\n");
+    }
+    debug_printf("\n");
+
+    // ScreenSettings Info
+    debug_printf("ScreenSettings (at %p):\n", (void*)screen_settings);
+    if (screen_settings) {
+        debug_printf("  cursor_x: %d\n", screen_settings->cursor_x);
+        debug_printf("  cursor_y: %d\n", screen_settings->cursor_y);
+        debug_printf("  logical_wanted_x: %d\n", screen_settings->logical_wanted_x);
+        debug_printf("  first_printline: %d\n", screen_settings->first_printline);
+    } else {
+        debug_printf("  ScreenSettings is NULL\n");
+    }
+    debug_printf("\n");
+
+    // VisualCache Info
+    debug_printf("VisualCache (at %p):\n", (void*)visual_cache);
+    if (visual_cache) {
+        debug_printf("  lines_screen_height: %p\n", (void*)visual_cache->lines_screen_height);
+        debug_printf("  lines_num (vc): %d\n", visual_cache->lines_num);
+        debug_printf("  lines_capacity (vc): %d\n", visual_cache->lines_capacity);
+
+        if (visual_cache->lines_screen_height) {
+            debug_printf("  First %d lines_screen_height values (if available):\n", 5);
+            for (int i = 0; i < visual_cache->lines_num && i < 5; ++i) {
+                debug_printf("    lines_screen_height[%d]: %d\n", i, visual_cache->lines_screen_height[i]);
+            }
+        }
+debug_printf("  First %d prefix_sum_line_heights values (if relevant and < 2500):\n",5);
+        // Max index for prefix_sum is visual_cache->lines_num (sum up to line lines_num-1)
+        for (int i = 0; i <= visual_cache->lines_num && i < 5 && i < 2500; ++i) {
+            debug_printf("    prefix_sum_line_heights[%d]: %d\n", i, visual_cache->prefix_sum_line_heights[i]);
+        }
+    } else {
+        debug_printf("  VisualCache is NULL\n");
+    }
+    debug_printf("\n--- Debug Info End ---\n");
+
+    // Ensure all output is flushed before sleep, though write is usually unbuffered to terminal
+    fflush(stdout); // technically for STDOUT_FILENO, fsync(STDOUT_FILENO) or tcdrain(STDOUT_FILENO) might be more direct if issues.
+                    // but for simple debug output, this should be fine.
+
+    sleep(5); // Increased sleep duration to 5 seconds for better readability
+}
 
 //VISUAL_CACHE
 
@@ -942,8 +1048,13 @@ void editorProcessKeypress(struct TextBuffer *buffer, struct WindowSettings *ws,
   case ('\n'):
     bufferHandleNewLineInput(buffer, screen_settings, visual_cache, ws);
     break;
+  case CTRL_KEY('d'):
+    break;
   case CTRL_KEY('p'):
     editorOutputBufferText(buffer);
+    break;
+  case CTRL_KEY('i'):
+    editorOutputInfo(buffer, screen_settings, ws, visual_cache);
     break;
   case DEL:
   case BACKSPACE:
