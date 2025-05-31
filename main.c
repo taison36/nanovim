@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <poll.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -15,7 +16,7 @@
 #define INITIAL_LINES_CAPACITY 10
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define MAX(a, b) (a) > (b) ? (a) : (b)
 
 struct termios orig_termios;
 
@@ -23,53 +24,64 @@ struct termios orig_termios;
 struct WindowSettings;
 struct ScreenSettings;
 struct TextBuffer;
-
+struct VisualCache;
 void bufferLoadCurLine(struct TextBuffer *buffer);
 void curLineClearAndResetX(struct TextBuffer *buffer);
 void curLineWriteChar(struct TextBuffer *buffer, char c);
 void bufferSaveCurrentLine(struct TextBuffer *buffer);
 void editorUpdateCursorCoordinates(struct TextBuffer *buffer,
                                    struct WindowSettings *ws,
-                                   struct ScreenSettings *screen_settings);
-void editorRefreshScreen(struct TextBuffer *buffer, struct WindowSettings *ws, struct ScreenSettings *screen_settings);
+                                   struct ScreenSettings *screen_settings, struct VisualCache *visual_cache);
+void editorRefreshScreen(struct TextBuffer *buffer, struct WindowSettings *ws,
+                         struct ScreenSettings *screen_settings);
 void editorRefreshCursor(struct ScreenSettings *screen_settings);
 void freeTextBuffer(struct TextBuffer *buffer);
 void moveCursorDown(struct TextBuffer *buffer,
-                    struct ScreenSettings *screen_settings);
+                    struct ScreenSettings *screen_settings, struct VisualCache *visual_cache, struct WindowSettings *ws);
 void die(const char *s);
 void cleanEditor();
 void curLineWriteChars(struct TextBuffer *buffer, const char *chars);
 void bufferHandleNewLineInput(struct TextBuffer *buffer,
-                              struct ScreenSettings *screen_settings);
+                              struct ScreenSettings *screen_settings, struct VisualCache *visual_cache, struct WindowSettings *ws);
 int countNewLineChars(const char *str);
 void editorEnsureLineCapacity(struct TextBuffer *buffer, int required_idx);
 char *addNewLineChar(char *str);
+void updateLineVisualCache(struct VisualCache *visual_cache, struct WindowSettings *ws, int cur_y, char *line);
+void calculate_screenY_and_first_printline(struct TextBuffer *buffer,
+                               struct ScreenSettings *screen_settings,
+                               struct WindowSettings *ws,
+                               struct VisualCache *visual_cache);
 
 // INIT
 struct TextBuffer {
   char **lines;
-  int numlines;
-  int linesCapacity;
-  int curX;
-  int curY;
-  char curLine[SIZELINE];
+  int lines_num;
+  int lines_capacity;
+  int cur_x;
+  int cur_y;
+  char cur_line[SIZELINE];
 };
 
 struct WindowSettings {
-  int terminal_width;
-  int terminal_height;
   int top_offset;
   int bottom_offset;
   int left_offset;
-  int max_x;
-  int max_y;
+  int screen_width;
+  int screen_height;
 };
 
 struct ScreenSettings {
   int cursor_x;
   int cursor_y;
   int logical_wanted_x;
-  int first_textbuffer_line_to_print;
+  int first_printline;
+};
+
+struct VisualCache{
+  int *lines_screen_height;
+  int lines_num;
+  int lines_capacity;
+  int prefix_sum_line_heights[2500];
 };
 
 static struct TextBuffer global_buffer_for_cleanup;
@@ -77,23 +89,35 @@ static int global_buffer_initialized = 0;
 
 struct TextBuffer textBufferInit() {
   struct TextBuffer buffer;
-  buffer.curX = 0;
-  buffer.curY = 0;
-  buffer.numlines = 0;
-  buffer.linesCapacity = INITIAL_LINES_CAPACITY;
-  buffer.lines = malloc(buffer.linesCapacity * sizeof(char *));
+  buffer.cur_x = 0;
+  buffer.cur_y = 0;
+  buffer.lines_num = 0;
+  buffer.lines_capacity = INITIAL_LINES_CAPACITY;
+  buffer.lines = malloc(buffer.lines_capacity * sizeof(char *));
   if (buffer.lines == NULL) {
     die("textBufferInit: malloc for lines failed");
   }
-  for (int i = 0; i < buffer.linesCapacity; i++) {
+  for (int i = 0; i < buffer.lines_capacity; i++) {
     buffer.lines[i] = NULL;
   }
-  buffer.curLine[0] = '\0';
+  buffer.cur_line[0] = '\0';
 
   // For atexit cleanup
   global_buffer_for_cleanup = buffer;
   global_buffer_initialized = 1;
   return buffer;
+}
+
+struct VisualCache visualCacheInit(){
+  struct VisualCache visual_cache;
+  visual_cache.lines_num = 0;
+  visual_cache.lines_capacity = INITIAL_LINES_CAPACITY;
+  visual_cache.lines_screen_height = malloc(visual_cache.lines_capacity * sizeof(int));
+  if(visual_cache.lines_screen_height == NULL){
+    die("visualCacheInit: malloc failed");
+  }
+
+  return visual_cache;
 }
 
 struct WindowSettings windowSettingsInit() {
@@ -103,14 +127,14 @@ struct WindowSettings windowSettingsInit() {
   ws.bottom_offset = 0; // NOTE for status bar later
   ws.left_offset = 0;
 
-  struct winsize w;
-  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == -1) {
-    die("windowSettingsInit: ioctl. Cannot proceed without terminal size");
-  }
-  ws.terminal_width = w.ws_col - ws.left_offset;
-  ws.terminal_height = w.ws_row;
-  ws.max_x = ws.terminal_width;
-  ws.max_y = ws.terminal_height - (ws.bottom_offset + ws.top_offset);
+ struct winsize w;
+ if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == -1) {
+   die("windowSettingsInit: ioctl. Cannot proceed without terminal size");
+ }
+ ws.screen_width = w.ws_col - ws.left_offset;
+ ws.screen_height = w.ws_row - (ws.bottom_offset + ws.top_offset);
+ // ws.screen_width = 20 - ws.left_offset;
+ // ws.screen_height = 5 - (ws.bottom_offset + ws.top_offset);
   return ws;
 }
 
@@ -120,6 +144,17 @@ void die(const char *s) {
   perror(s);
   exit(1);
 }
+
+void switchToMainScreen() {
+    write(STDOUT_FILENO, "\x1b[?1049l", 7);
+}
+
+void switchToAlternateScreen() {
+  atexit(switchToMainScreen);
+  write(STDOUT_FILENO, "\x1b[?1049h", 7);
+  write(STDOUT_FILENO, "\x1b[H\x1b[2J", 7);
+}
+
 
 void disableRawMode() {
   if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios) == -1)
@@ -145,24 +180,21 @@ void enableRawMode() {
     die("tcsetattr");
 }
 
+
 // HELPER
 char *addNewLineChar(char *str) {
   if (str == NULL) {
-    return NULL; // Return NULL if input is NULL.
+    return NULL;
   }
-
   size_t str_len = strlen(str);
 
-  // Use a temporary pointer to avoid the realloc pitfall.
   char *temp = realloc(str, str_len + 3); // +2 for \r\n, +1 for \0
   if (temp == NULL) {
     die("addNewLineChar: realloc failed");
   }
 
-  // Now it's safe to update the pointer.
   str = temp;
 
-  // Append the newline characters.
   str[str_len] = '\r';
   str[str_len + 1] = '\n';
   str[str_len + 2] = '\0';
@@ -205,18 +237,6 @@ char **splitLine(const char *str, size_t n) {
   return res;
 }
 
-void moveRowsDown(char **lines, int row_to_move, int *num_lines) {
-  if (lines == NULL || row_to_move < 0)
-    return;
-
-  for (int i = *num_lines; i > row_to_move; i--) {
-    lines[i] = lines[i - 1];
-  }
-
-  (*num_lines)++;
-
-  lines[row_to_move] = NULL;
-}
 
 int countNewLineChars(const char *str) {
   if (str == NULL) {
@@ -246,13 +266,13 @@ void cleanEditor() {
 void freeTextBuffer(struct TextBuffer *buffer) {
   if (buffer == NULL || buffer->lines == NULL)
     return;
-  for (int i = 0; i < buffer->numlines; i++) {
+  for (int i = 0; i < buffer->lines_num; i++) {
     if (buffer->lines[i] != NULL) {
       free(buffer->lines[i]);
       buffer->lines[i] = NULL;
     }
   }
-  for (int i = buffer->numlines; i < buffer->linesCapacity; i++) {
+  for (int i = buffer->lines_num; i < buffer->lines_capacity; i++) {
     if (buffer->lines[i] != NULL) {
       free(buffer->lines[i]);
       buffer->lines[i] = NULL;
@@ -260,8 +280,8 @@ void freeTextBuffer(struct TextBuffer *buffer) {
   }
   free(buffer->lines);
   buffer->lines = NULL;
-  buffer->numlines = 0;
-  buffer->linesCapacity = 0;
+  buffer->lines_num = 0;
+  buffer->lines_capacity = 0;
 }
 
 void copyLine(char *from, char *to) {
@@ -329,14 +349,55 @@ void moveCharsLeft(char *str, int cur_pos, int n) {
   }
 }
 
-void moveRowsUp(char **lines, int num_lines, int row_to_delete) {
+void moveRowsUp(char **lines,int *num_lines, int row_to_delete){
   // so cur_row disappears
-  if (lines == NULL || row_to_delete < 0)
-    return;
+  if(lines==NULL || row_to_delete < 0) return;
 
-  for (int i = row_to_delete; i < num_lines; i++) {
-    lines[i] = lines[i + 1];
+  if(lines[row_to_delete] != NULL){
+    free(lines[row_to_delete]);
+    lines[row_to_delete] = NULL;
   }
+
+  for(int i = row_to_delete; i<*num_lines; i++){
+    lines[i] = lines[i+1];
+  }
+
+ (*num_lines)--;
+}
+
+void moveIntsUp(int *arr, int *num_elements, int index_to_delete) {
+  if (arr == NULL || index_to_delete < 0 || index_to_delete >= *num_elements){
+    return;
+  }
+
+  for (int i = index_to_delete; i < *num_elements - 1; i++) {
+      arr[i] = arr[i + 1];
+  }
+
+  (*num_elements)--;
+}
+
+void moveIntsDown(int *arr, int index_to_insert, int *num_elements) {
+    if (arr == NULL || index_to_insert < 0 || index_to_insert > *num_elements) return;
+
+    for (int i = *num_elements; i > index_to_insert; i--) {
+        arr[i] = arr[i - 1];
+    }
+
+    arr[index_to_insert] = -1;
+    (*num_elements)++;
+}
+
+void moveRowsDown(char **lines, int row_to_move, int *num_lines){
+  if(lines==NULL || row_to_move < 0) return;
+
+  for (int i = *num_lines; i > row_to_move; i--) {
+    lines[i] = lines[i - 1];
+  }
+
+  lines[row_to_move] = NULL;
+
+  (*num_lines)++;
 }
 
 char *makeStringFromInt(int n) {
@@ -354,71 +415,55 @@ int getScreenLinesForString(const char *str, struct WindowSettings *ws) {
   int len = strlen(str);
   int stringLength = len;
 
-  if (stringLength >= 2 && str[stringLength - 2] == '\r' &&
-      str[stringLength - 1] == '\n') {
-    stringLength -= 2;
-  } else if (stringLength >= 1 &&
-             (str[stringLength - 1] == '\r' || str[stringLength - 1] == '\n')) {
-    stringLength -= 1;
-  }
+  stringLength -= countNewLineChars(str);
 
   if (stringLength == 0) {
     return 1;
   }
 
-  if (ws->terminal_width == 0)
+  if (ws->screen_width == 0){
     return 1;
-  return (stringLength / ws->terminal_width) +
-         ((stringLength % ws->terminal_width != 0) ? 1 : 0);
+  }
+  return (stringLength / ws->screen_width) +
+         ((stringLength % ws->screen_width != 0) ? 1 : 0);
 }
 
 // DYNAMIC ARRAY MANAGEMENT for buffer->lines
-void editorEnsureLineCapacity(struct TextBuffer *buffer, int required_idx) {
-  if (required_idx >= buffer->linesCapacity) {
-    int newCapacity = buffer->linesCapacity == 0 ? INITIAL_LINES_CAPACITY
-                                                 : buffer->linesCapacity * 2;
-    while (newCapacity <= required_idx) {
+void editorEnsureLineCapacity(struct TextBuffer *buffer, int lines_num) {
+  if (lines_num >= buffer->lines_capacity) {
+    int newCapacity = buffer->lines_capacity == 0 ? INITIAL_LINES_CAPACITY : buffer->lines_capacity * 2;
+    while (newCapacity <= lines_num) {
       newCapacity *= 2;
     }
     char **new_lines = realloc(buffer->lines, newCapacity * sizeof(char *));
     if (!new_lines)
       die("editorEnsureLineCapacity: realloc lines failed");
 
-    for (int i = buffer->linesCapacity; i < newCapacity; i++) {
+    for (int i = buffer->lines_capacity; i < newCapacity; i++) {
       new_lines[i] = NULL;
     }
     buffer->lines = new_lines;
-    buffer->linesCapacity = newCapacity;
+    buffer->lines_capacity = newCapacity;
   }
 }
 
 // CURSOR
 void editorUpdateCursorCoordinates(struct TextBuffer *buffer,
                                    struct WindowSettings *ws,
-                                   struct ScreenSettings *screen_settings) {
-  screen_settings->cursor_y = ws->top_offset + 1;
+                                   struct ScreenSettings *screen_settings,
+                                   struct VisualCache *visual_cache) {
+  calculate_screenY_and_first_printline(buffer, screen_settings, ws, visual_cache);
 
-  screen_settings->first_textbuffer_line_to_print = 0;
-
-  for (int i = 0; i < buffer->curY; i++) {
-
-    if(screen_settings->cursor_y>ws->max_y){
-      screen_settings->first_textbuffer_line_to_print++;
-    }
-
-    if (i < buffer->numlines && buffer->lines[i] != NULL) {
-      screen_settings->cursor_y += getScreenLinesForString(buffer->lines[i], ws);
-    } else {
-      screen_settings->cursor_y += 1;
-    }
+  int y = 1;
+  for (int i = screen_settings->first_printline; i < buffer->cur_y; i++) {
+    y += visual_cache->lines_screen_height[i];
   }
+  y += (ws->screen_width > 0) ? (buffer->cur_x / ws->screen_width) : 0;
 
-  if (ws->terminal_width > 0) {
-    screen_settings->cursor_x = (buffer->curX % ws->terminal_width) + 1;
-    screen_settings->cursor_y += (buffer->curX / ws->terminal_width);
-  } else {
-    screen_settings->cursor_x = buffer->curX + 1;
-  }
+  screen_settings->cursor_y = y;
+  screen_settings->cursor_x = (ws->screen_width > 0)
+                                ? (buffer->cur_x % ws->screen_width) + 1
+                                : buffer->cur_x + 1;
 }
 
 void editorRefreshCursor(struct ScreenSettings *screen_settings) {
@@ -447,171 +492,194 @@ void editorRefreshCursor(struct ScreenSettings *screen_settings) {
 }
 
 void moveCursorRight(struct TextBuffer *buffer,
-                     struct ScreenSettings *screen_settings) {
-  int stringLength = strlen(buffer->curLine);
+                     struct ScreenSettings *screen_settings, struct VisualCache *visual_cache, struct WindowSettings *ws) {
+  int stringLength = strlen(buffer->cur_line);
 
-  if (stringLength >= 2 && buffer->curLine[stringLength - 2] == '\r' &&
-      buffer->curLine[stringLength - 1] == '\n') {
+  if (stringLength >= 2 && buffer->cur_line[stringLength - 2] == '\r' &&
+      buffer->cur_line[stringLength - 1] == '\n') {
     stringLength -= 2;
-  } else if (stringLength >= 1 && (buffer->curLine[stringLength - 1] == '\r' ||
-                                   buffer->curLine[stringLength - 1] == '\n')) {
+  } else if (stringLength >= 1 && (buffer->cur_line[stringLength - 1] == '\r' ||
+                                   buffer->cur_line[stringLength - 1] == '\n')) {
     stringLength -= 1;
   }
 
-  if (buffer->curX < stringLength) {
-    buffer->curX++;
-  } else if (buffer->curY < buffer->numlines) {
+  if (buffer->cur_x < stringLength) {
+    buffer->cur_x++;
+  } else if (buffer->cur_y < buffer->lines_num) {
     bufferSaveCurrentLine(buffer);
-    moveCursorDown(buffer, screen_settings);
+    moveCursorDown(buffer, screen_settings, visual_cache, ws);
   }
-  screen_settings->logical_wanted_x = buffer->curX;
+  screen_settings->logical_wanted_x = buffer->cur_x + 1;
 }
 
 void moveCursorLeft(struct TextBuffer *buffer,
                     struct ScreenSettings *screen_settings) {
-  if (buffer->curX > 0) {
-    buffer->curX--;
-  } else if (buffer->curY > 0) {
+  if (buffer->cur_x > 0) {
+    buffer->cur_x--;
+  } else if (buffer->cur_y > 0) {
     bufferSaveCurrentLine(buffer);
-    buffer->curY--;
+    buffer->cur_y--;
     bufferLoadCurLine(buffer);
-    int prevLineLen = strlen(buffer->curLine);
-    if (prevLineLen >= 2 && buffer->curLine[prevLineLen - 2] == '\r' &&
-        buffer->curLine[prevLineLen - 1] == '\n') {
+    int prevLineLen = strlen(buffer->cur_line);
+    if (prevLineLen >= 2 && buffer->cur_line[prevLineLen - 2] == '\r' &&
+        buffer->cur_line[prevLineLen - 1] == '\n') {
       prevLineLen -= 2;
-    } else if (prevLineLen >= 1 && (buffer->curLine[prevLineLen - 1] == '\r' ||
-                                    buffer->curLine[prevLineLen - 1] == '\n')) {
+    } else if (prevLineLen >= 1 && (buffer->cur_line[prevLineLen - 1] == '\r' ||
+                                    buffer->cur_line[prevLineLen - 1] == '\n')) {
       prevLineLen -= 1;
     }
-    buffer->curX = prevLineLen;
+    buffer->cur_x = prevLineLen;
   }
-  screen_settings->logical_wanted_x = buffer->curX;
+  screen_settings->logical_wanted_x = buffer->cur_x + 1;
 }
 
-void moveCursorUp(struct TextBuffer *buffer, struct ScreenSettings *screen_settings) {
-  if (buffer->curY == 0)
+void moveCursorUp(struct TextBuffer *buffer,
+                  struct ScreenSettings *screen_settings) {
+  if (buffer->cur_y == 0)
     return;
 
   bufferSaveCurrentLine(buffer);
 
-  buffer->curY--;
+  buffer->cur_y--;
 
   bufferLoadCurLine(buffer);
 
-  int lineLen = strlen(buffer->curLine);
-  if (lineLen >= 2 && buffer->curLine[lineLen - 2] == '\r' &&
-      buffer->curLine[lineLen - 1] == '\n') {
-    lineLen -= 2;
-  } else if (lineLen >= 1 && (buffer->curLine[lineLen - 1] == '\r' ||
-                              buffer->curLine[lineLen - 1] == '\n')) {
-    lineLen -= 1;
-  }
-
-  buffer->curX = MIN(lineLen, screen_settings->logical_wanted_x);
+  int lineLen = strlen(buffer->cur_line) - countNewLineChars(buffer->cur_line);
+  buffer->cur_x = MIN(lineLen, screen_settings->logical_wanted_x);
 }
 
 void moveCursorDown(struct TextBuffer *buffer,
-                    struct ScreenSettings *screen_settings) {
-  if (buffer->curY < buffer->numlines) {
+                    struct ScreenSettings *screen_settings, struct VisualCache *visual_cache, struct WindowSettings *ws) {
+  if (buffer->cur_y < buffer->lines_num) {
     bufferSaveCurrentLine(buffer);
 
-    buffer->curY++;
 
     // Hitting the virtual line
-    if (buffer->curY == buffer->numlines) {
+    if (buffer->cur_y == buffer->lines_num - 1) {
 
-      buffer->curY--;
 
       bufferLoadCurLine(buffer);
 
-      int len = strlen(buffer->curLine);
+      int len = strlen(buffer->cur_line);
       // i need to handle go to the virtual line also as the 'enter' press. so
       // put to the of the line \r\n;
-      if (!(len >= 2 && buffer->curLine[len - 2] == '\r' &&
-            buffer->curLine[len - 1] == '\n')) {
-        buffer->curX = len;
+      if (countNewLineChars(buffer->cur_line)<2) {
+        buffer->cur_x = len;
         curLineWriteChar(buffer, '\r');
         curLineWriteChar(buffer, '\n');
         bufferSaveCurrentLine(buffer);
+        updateLineVisualCache(visual_cache, ws, buffer->cur_y, buffer->cur_line);
       }
 
-      buffer->curY++;
+      buffer->cur_y++;
       curLineClearAndResetX(buffer);
+      bufferSaveCurrentLine(buffer);
     } else {
+      buffer->cur_y++;
       bufferLoadCurLine(buffer);
+      int lenCurrentLine = strlen(buffer->cur_line) - countNewLineChars(buffer->cur_line);
+      buffer->cur_x = MIN(lenCurrentLine, screen_settings->logical_wanted_x);
     }
-
-    int lenCurrentLine = strlen(buffer->curLine);
-    if (buffer->curY < buffer->numlines) {
-      if (lenCurrentLine >= 2 && buffer->curLine[lenCurrentLine - 2] == '\r' &&
-          buffer->curLine[lenCurrentLine - 1] == '\n') {
-        lenCurrentLine -= 2;
-      } else if (lenCurrentLine >= 1 &&
-                 (buffer->curLine[lenCurrentLine - 1] == '\r' ||
-                  buffer->curLine[lenCurrentLine - 1] == '\n')) {
-        lenCurrentLine -= 1;
-      }
-    }
-    buffer->curX = MIN(lenCurrentLine, screen_settings->logical_wanted_x);
   }
 }
 
 // OUTPUT
-void screenBufferWriteLine(char *line, int *shownY, struct WindowSettings *ws, int *appended, int *size, char *screenBuffer){
-    int len = strlen(line);
-    int offset = 0;
-
-    while (offset < len && *shownY < ws->max_y) {
-      int remain = len - offset;
-      int lineLength = (remain > ws->max_x) ? ws->max_x : remain;
-
-      if (appended + lineLength + 2 >= size) {
-        (*size) *= 2;
-        screenBuffer = realloc(screenBuffer, *size);
-        if (!screenBuffer)
-          die("editorPrepareBufferForScree: realloc failed");
-      }
-
-      memcpy(&screenBuffer[*appended], &line[offset], lineLength);
-      appended += lineLength;
-
-      if (remain > ws->max_x) { // If the line was wrapped, add \r\n for display
-        screenBuffer[*appended++] = '\r';
-        screenBuffer[*appended++] = '\n';
-      }
-
-      offset += lineLength;
-      shownY++;
-    }
+void build_prefix_sum(struct VisualCache *vc) {
+  vc->prefix_sum_line_heights[0] = 0;
+  for (int i = 1; i <= vc->lines_num; i++) {
+    vc->prefix_sum_line_heights[i] =
+        vc->prefix_sum_line_heights[i - 1] + vc->lines_screen_height[i - 1];
+  }
 }
 
-char *editorPrepareBufferForScreen(struct TextBuffer *buffer, struct WindowSettings *ws, struct ScreenSettings *screen_settings) {
+
+void calculate_screenY_and_first_printline(struct TextBuffer *buffer,
+                                           struct ScreenSettings *screen_settings,
+                                           struct WindowSettings *ws,
+                                           struct VisualCache *vc) {
+  build_prefix_sum(vc);
+
+  int y = buffer->cur_y;
+  int line_end_y = vc->prefix_sum_line_heights[y + 1];
+  int line_height = vc->lines_screen_height[y];
+
+  int first = screen_settings->first_printline;
+
+  // Пока строка не помещается целиком вниз — скроллим вниз
+  while ((line_end_y - vc->prefix_sum_line_heights[first]) > ws->screen_height &&
+         first < y) {
+    first++;
+  }
+
+  // Пока строка не помещается целиком вверх — скроллим вверх
+  while ((line_end_y - vc->prefix_sum_line_heights[first]) < line_height &&
+         first > 0) {
+    first--;
+  }
+
+  screen_settings->first_printline = first;
+}
+
+void screenBufferWriteLine(char *line, int *shownY, struct WindowSettings *ws,
+                           int *appended, int *size, char **screenBuffer) {
+  if (line == NULL)
+    return;
+  int len = strlen(line);
+  int offset = 0;
+
+  while (offset < len && *shownY < ws->screen_height) {
+    int remain = len - offset;
+    int lineLength = (remain > ws->screen_width) ? ws->screen_width : remain;
+
+    if (*appended + lineLength + 2 >= *size) {
+      while (*appended + lineLength + 2 >= *size) {
+        (*size) *= 2;
+      }
+      char *temp = realloc(*screenBuffer, *size);
+      if (!temp) {
+        die("screenBufferWriteLine: realloc failed");
+      }
+      *screenBuffer = temp;
+    }
+
+    memcpy(&(*screenBuffer)[*appended], &line[offset], lineLength);
+    *appended += lineLength;
+
+    if (remain > ws->screen_width) { // If the line was wrapped, add \r\n for display
+      (*screenBuffer)[(*appended)++] = '\r';
+      (*screenBuffer)[(*appended)++] = '\n';
+    }
+
+    offset += lineLength;
+    (*shownY)++;
+  }
+}
+
+char *editorPrepareBufferForScreen(struct TextBuffer *buffer,
+                                   struct WindowSettings *ws,
+                                   struct ScreenSettings *screen_settings) {
   int size = 2500;
   char *screenBuffer = malloc(size);
-
-  if (!screenBuffer) die("editorPrepareBufferForScreen: malloc failed");
+  if (!screenBuffer)
+    die("editorPrepareBufferForScreen: malloc failed");
 
   int appended = 0;
   int shownY = 0;
 
-  for (int i = screen_settings->first_textbuffer_line_to_print; i <= buffer->numlines && shownY < ws->max_y; i++) { // NOTE i am going from the FIRST line to the last
-
-    char *line = buffer->lines[i];
-
-    if (line == NULL)
-      continue;
-    screenBufferWriteLine(line, &shownY, ws, &appended, &size, screenBuffer);
+  for (int i = screen_settings->first_printline; i < buffer->lines_num && shownY < ws->screen_height; i++) { // NOTE i am going from the FIRST line to the last
+    screenBufferWriteLine(buffer->lines[i], &shownY, ws, &appended, &size, &screenBuffer);
   }
 
   screenBuffer[appended] = '\0';
+
   return screenBuffer;
 }
 
-
-void editorRefreshScreen(struct TextBuffer *buffer, struct WindowSettings *ws, struct ScreenSettings *screen_settings) {
+void editorRefreshScreen(struct TextBuffer *buffer, struct WindowSettings *ws,
+                         struct ScreenSettings *screen_settings) {
   // clear the terminal
   write(STDOUT_FILENO, "\x1b[2J", 4);
-  // put screen_settings to the top
+  // put cursor to the begining
   write(STDOUT_FILENO, "\x1b[H", 3);
 
   char *screenBuffer = editorPrepareBufferForScreen(buffer, ws, screen_settings);
@@ -626,7 +694,7 @@ void editorOutputBufferText(struct TextBuffer *buffer) {
   write(STDOUT_FILENO, "\x1b[2J", 4);
   // put screen_settings to the top
   write(STDOUT_FILENO, "\x1b[H", 3);
-  for (int i = 0; i < buffer->numlines; i++) {
+  for (int i = 0; i < buffer->lines_num; i++) {
     char *str = buffer->lines[i];
     while (*str != '\0') {
       write(STDOUT_FILENO, str, 1);
@@ -637,11 +705,46 @@ void editorOutputBufferText(struct TextBuffer *buffer) {
   sleep(1);
 }
 
+
+//VISUAL_CACHE
+
+void updateLineVisualCache(struct VisualCache *visual_cache, struct WindowSettings *ws, int cur_y,
+                           char *line) {
+  visual_cache->lines_screen_height[cur_y] = getScreenLinesForString(line, ws);
+}
+
+void addLineVisualCache(struct VisualCache *visual_cache, struct WindowSettings *ws, int cur_y,
+                           char *line) {
+
+  //ensure enough memory
+  if(visual_cache->lines_num+1>=visual_cache->lines_capacity){
+    int new_capacity = visual_cache->lines_capacity == 0 ? INITIAL_LINES_CAPACITY : visual_cache->lines_capacity;
+    while(visual_cache->lines_num+1 >= new_capacity){
+      new_capacity *= 2;
+    }
+    int *new_array = realloc(visual_cache->lines_screen_height, new_capacity * sizeof(int));
+    if(!new_array){
+      free(visual_cache->lines_screen_height);
+      die("addLineVisualCache: failed realloc");
+    }else{
+      visual_cache->lines_screen_height = new_array;
+      visual_cache->lines_capacity = new_capacity;
+    }
+  }
+
+  moveIntsDown(visual_cache->lines_screen_height, cur_y, &visual_cache->lines_num);
+  visual_cache->lines_screen_height[cur_y] = getScreenLinesForString(line, ws);
+}
+
+void removeLineVisualCache(struct VisualCache *visual_cache, int cur_y) {
+  moveIntsUp(visual_cache->lines_screen_height, &visual_cache->lines_num, cur_y);
+}
+
 // INPUT
 
 void bufferLoadCurLine(struct TextBuffer *buffer) {
-  if (buffer->curY < buffer->numlines) {
-    copyLine(buffer->lines[buffer->curY], buffer->curLine);
+  if (buffer->cur_y < buffer->lines_num) {
+    copyLine(buffer->lines[buffer->cur_y], buffer->cur_line);
   } else {
     // die("bufferLoadCurLine: trying to add in the buffer a line, that doesnt
     // exist");
@@ -650,61 +753,62 @@ void bufferLoadCurLine(struct TextBuffer *buffer) {
 }
 
 void curLineDeleteChar(struct TextBuffer *buffer,
-                       struct ScreenSettings *screen_settings) {
-  if (buffer->curX == 0 && buffer->curY > 0) {
+                       struct ScreenSettings *screen_settings, struct VisualCache *visual_cache, struct WindowSettings *ws) {
+  if (buffer->cur_x == 0 && buffer->cur_y > 0) {
     bufferSaveCurrentLine(buffer);
 
-    char *prev_str = buffer->lines[buffer->curY - 1];
+    char *prev_str = buffer->lines[buffer->cur_y - 1];
     int len_prev_str = strlen(prev_str);
 
-    if (len_prev_str >= 2 && prev_str[len_prev_str - 2] == '\r' &&
-        prev_str[len_prev_str - 1] == '\n') {
+    if (countNewLineChars(prev_str) == 2) {
       prev_str[len_prev_str - 2] = '\0';
       len_prev_str -= 2;
-    } else if (len_prev_str >= 1 && prev_str[len_prev_str - 1] == '\n') {
+    } else if (countNewLineChars(prev_str) == 1) {
       prev_str[len_prev_str - 1] = '\0';
       len_prev_str -= 1;
     }
 
-    char *appended_line = appendTwoLines(prev_str, buffer->lines[buffer->curY]);
+    char *appended_line = appendTwoLines(prev_str, buffer->lines[buffer->cur_y]);
 
     if (appended_line == NULL) {
       die("curLineDeleteChar: appending of two lines is failed");
     }
 
-    free(buffer->lines[buffer->curY]);
-    moveRowsUp(buffer->lines, buffer->numlines, buffer->curY);
+    moveRowsUp(buffer->lines, &buffer->lines_num, buffer->cur_y);
+    removeLineVisualCache(visual_cache, buffer->cur_y);
 
-    buffer->curY--;
+    buffer->cur_y--;
     curLineClearAndResetX(buffer);
     curLineWriteChars(buffer, appended_line);
     free(appended_line);
 
     bufferSaveCurrentLine(buffer);
-    buffer->numlines--;
+    updateLineVisualCache(visual_cache, ws, buffer->cur_y, buffer->cur_line);
 
-    buffer->curX = len_prev_str;
-    screen_settings->logical_wanted_x = buffer->curX;
-  } else if (buffer->curX > 0) {
-    moveCharsLeft(buffer->curLine, buffer->curX, 1);
-    buffer->curX--;
+    buffer->cur_x = len_prev_str;
+    screen_settings->logical_wanted_x = buffer->cur_x + 1;
+  } else if (buffer->cur_x > 0) {
+    moveCharsLeft(buffer->cur_line, buffer->cur_x, 1);
+    buffer->cur_x--;
+    bufferSaveCurrentLine(buffer);
+    updateLineVisualCache(visual_cache, ws, buffer->cur_y, buffer->cur_line);
   }
 }
 
 void bufferSaveCurrentLine(struct TextBuffer *buffer) {
-  editorEnsureLineCapacity(buffer, buffer->curY);
+  editorEnsureLineCapacity(buffer, buffer->lines_num + 1);
 
-  int size = strlen(buffer->curLine);
+  int size = strlen(buffer->cur_line);
 
-  if (buffer->lines[buffer->curY] != NULL) {
-    free(buffer->lines[buffer->curY]); // Free existing memory
+  if (buffer->lines[buffer->cur_y] != NULL) {
+    free(buffer->lines[buffer->cur_y]); // Free existing memory
   }
-  buffer->lines[buffer->curY] = malloc(size + 1);
+  buffer->lines[buffer->cur_y] = malloc(size + 1);
 
-  if (buffer->lines[buffer->curY] == NULL) {
+  if (buffer->lines[buffer->cur_y] == NULL) {
     die("writeCurrentLineToBuffer: malloc failed");
   }
-  copyLine(buffer->curLine, buffer->lines[buffer->curY]);
+  copyLine(buffer->cur_line, buffer->lines[buffer->cur_y]);
 }
 
 char editorReadKey() {
@@ -718,21 +822,21 @@ char editorReadKey() {
 }
 
 void curLineWriteChar(struct TextBuffer *buffer, char c) {
-  if (buffer->curX >= SIZELINE - 1)
+  if (buffer->cur_x >= SIZELINE - 1)
     die("bufferWriteChar: SIZELINE is exceeded");
 
-  int len = strlen(buffer->curLine);
+  int len = strlen(buffer->cur_line);
 
-  if (buffer->curX < len) {
-    moveCharsRight(buffer->curLine, buffer->curX, 1);
+  if (buffer->cur_x < len) {
+    moveCharsRight(buffer->cur_line, buffer->cur_x, 1);
   }
 
-  buffer->curLine[buffer->curX] = c;
+  buffer->cur_line[buffer->cur_x] = c;
 
-  if (buffer->curX == len) {
-    buffer->curLine[buffer->curX + 1] = '\0';
+  if (buffer->cur_x == len) {
+    buffer->cur_line[buffer->cur_x + 1] = '\0';
   }
-  buffer->curX++;
+  buffer->cur_x++;
 }
 
 void curLineWriteChars(struct TextBuffer *buffer, const char *chars) {
@@ -741,31 +845,31 @@ void curLineWriteChars(struct TextBuffer *buffer, const char *chars) {
     return; // Nothing to do.
   }
 
-  size_t current_len = strlen(buffer->curLine);
+  size_t current_len = strlen(buffer->cur_line);
 
   if (current_len + add_len >= SIZELINE) {
     die("curLineWriteChars: New text exceeds SIZELINE limit");
   }
 
-  if (buffer->curX < (int)current_len) {
-    moveCharsRight(buffer->curLine, buffer->curX, add_len);
+  if (buffer->cur_x < (int)current_len) {
+    moveCharsRight(buffer->cur_line, buffer->cur_x, add_len);
   }
 
-  memcpy(&buffer->curLine[buffer->curX], chars, add_len);
-  buffer->curLine[current_len + add_len] = '\0';
-  buffer->curX += add_len;
+  memcpy(&buffer->cur_line[buffer->cur_x], chars, add_len);
+  buffer->cur_line[current_len + add_len] = '\0';
+  buffer->cur_x += add_len;
 }
 
 void curLineClearAndResetX(struct TextBuffer *buffer) {
-  buffer->curX = 0;
-  buffer->curLine[buffer->curX] = '\0'; // clear current line;
+  buffer->cur_x = 0;
+  buffer->cur_line[buffer->cur_x] = '\0'; // clear current line;
 }
 
 void bufferHandleNewLineInput(struct TextBuffer *buffer,
-                              struct ScreenSettings *screen_settings) {
-  editorEnsureLineCapacity(buffer, buffer->numlines + 1);
+                              struct ScreenSettings *screen_settings, struct VisualCache *visual_cache, struct WindowSettings *ws) {
+  editorEnsureLineCapacity(buffer, buffer->lines_num + 1);
 
-  char **splitted_lines = splitLine(buffer->curLine, buffer->curX);
+  char **splitted_lines = splitLine(buffer->cur_line, buffer->cur_x);
   if (splitted_lines == NULL) {
     return;
   }
@@ -773,25 +877,28 @@ void bufferHandleNewLineInput(struct TextBuffer *buffer,
   char *first_half = splitted_lines[0];
   char *second_half = splitted_lines[1];
 
-  moveRowsDown(buffer->lines, buffer->curY + 1, &buffer->numlines);
+  moveRowsDown(buffer->lines, buffer->cur_y + 1, &buffer->lines_num);
 
   curLineClearAndResetX(buffer);
 
   first_half = addNewLineChar(first_half);
+
   if (first_half == NULL) {
     die("bufferHandleNewLineInput: malloc failed -> first_half var");
   }
 
   curLineWriteChars(buffer, first_half);
   bufferSaveCurrentLine(buffer);
+  updateLineVisualCache(visual_cache, ws, buffer->cur_y, buffer->cur_line);
 
-  buffer->curY++;
+  buffer->cur_y++;
   curLineClearAndResetX(buffer);
   curLineWriteChars(buffer, second_half);
   bufferSaveCurrentLine(buffer);
+  addLineVisualCache(visual_cache, ws, buffer->cur_y, buffer->cur_line);
 
-  buffer->curX = 0;
-  screen_settings->logical_wanted_x = 0;
+  buffer->cur_x = 0;
+  screen_settings->logical_wanted_x = 1;
 
   free(first_half);
   free(second_half);
@@ -799,7 +906,7 @@ void bufferHandleNewLineInput(struct TextBuffer *buffer,
 }
 
 void bufferHandleEscapeSequence(struct TextBuffer *buffer,
-                                struct ScreenSettings *screen_settings) {
+                                struct ScreenSettings *screen_settings, struct VisualCache *visual_cache, struct WindowSettings *ws) {
   if (!isInputAvailable())
     return;
   char c = editorReadKey();
@@ -813,10 +920,10 @@ void bufferHandleEscapeSequence(struct TextBuffer *buffer,
     moveCursorUp(buffer, screen_settings);
     break;
   case 'B':
-    moveCursorDown(buffer, screen_settings);
+    moveCursorDown(buffer, screen_settings, visual_cache, ws);
     break;
   case 'C':
-    moveCursorRight(buffer, screen_settings);
+    moveCursorRight(buffer, screen_settings, visual_cache, ws);
     break;
   case 'D':
     moveCursorLeft(buffer, screen_settings);
@@ -824,8 +931,7 @@ void bufferHandleEscapeSequence(struct TextBuffer *buffer,
   }
 }
 
-void editorProcessKeypress(struct TextBuffer *buffer, struct WindowSettings *ws,
-                           struct ScreenSettings *screen_settings) {
+void editorProcessKeypress(struct TextBuffer *buffer, struct WindowSettings *ws, struct ScreenSettings *screen_settings, struct VisualCache *visual_cache) {
   char c = editorReadKey();
 
   switch (c) {
@@ -834,43 +940,52 @@ void editorProcessKeypress(struct TextBuffer *buffer, struct WindowSettings *ws,
     break;
   case ('\r'):
   case ('\n'):
-    bufferHandleNewLineInput(buffer, screen_settings);
+    bufferHandleNewLineInput(buffer, screen_settings, visual_cache, ws);
     break;
   case CTRL_KEY('p'):
     editorOutputBufferText(buffer);
     break;
   case DEL:
   case BACKSPACE:
-    curLineDeleteChar(buffer, screen_settings);
-    bufferSaveCurrentLine(buffer);
+    curLineDeleteChar(buffer, screen_settings, visual_cache, ws);
     break;
   case ('\x1b'):
-    bufferHandleEscapeSequence(buffer, screen_settings);
+    bufferHandleEscapeSequence(buffer, screen_settings, visual_cache, ws);
     break;
   default:
-    if (buffer->curY == buffer->numlines) {
-      buffer->numlines++;
+    if (buffer->cur_y == buffer->lines_num) {
+      buffer->lines_num++;
+      visual_cache->lines_num++;
     }
+
+    if(screen_settings->first_printline < 0 || screen_settings->cursor_y < 0){
+      write(STDOUT_FILENO, "shit", 4);
+      sleep(1);
+    }
+
     curLineWriteChar(buffer, c);
     bufferSaveCurrentLine(buffer);
-    screen_settings->logical_wanted_x = buffer->curX;
+    updateLineVisualCache(visual_cache, ws, buffer->cur_y, buffer->cur_line);
+    screen_settings->logical_wanted_x = buffer->cur_x + 1;
     break;
   }
 
+  editorUpdateCursorCoordinates(buffer, ws, screen_settings, visual_cache);
   editorRefreshScreen(buffer, ws, screen_settings);
-  editorUpdateCursorCoordinates(buffer, ws, screen_settings);
   editorRefreshCursor(screen_settings);
 }
 
 // INIT
 int main() {
+  switchToAlternateScreen();
   enableRawMode();
   struct TextBuffer buffer = textBufferInit();
   struct WindowSettings ws = windowSettingsInit();
-  struct ScreenSettings screen_settings = {1, 1, 0, 0};
+  struct ScreenSettings screen_settings = {1, 1, 1, 0};
+  struct VisualCache visual_cache = visualCacheInit();
   editorRefreshScreen(&buffer, &ws, &screen_settings);
   while (1) {
-    editorProcessKeypress(&buffer, &ws, &screen_settings);
+    editorProcessKeypress(&buffer, &ws, &screen_settings, &visual_cache);
   }
   cleanEditor();
   return 0;
