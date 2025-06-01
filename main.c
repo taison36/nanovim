@@ -1,6 +1,6 @@
+#include <assert.h>
 #include <errno.h>
 #include <poll.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,13 +20,12 @@
 
 struct termios orig_termios;
 
-// Forward declarationsstruct TextBuffer;
 struct WindowSettings;
 struct ScreenSettings;
 struct TextBuffer;
 struct VisualCache;
 void bufferLoadCurLine(struct TextBuffer *buffer);
-void addLineVisualCache(struct VisualCache *visual_cache, struct WindowSettings *ws, int cur_y,
+void vcache_schift_add_line(struct VisualCache *visual_cache, struct WindowSettings *ws, int cur_y,
                            char *line);
 void curLineClearAndResetX(struct TextBuffer *buffer);
 void curLineWriteChar(struct TextBuffer *buffer, char c);
@@ -48,7 +47,7 @@ void bufferHandleNewLineInput(struct TextBuffer *buffer,
 int countNewLineChars(const char *str);
 void editorEnsureLineCapacity(struct TextBuffer *buffer, int required_idx);
 char *addNewLineChar(char *str);
-void updateLineVisualCache(struct VisualCache *visual_cache, struct WindowSettings *ws, int cur_y, char *line);
+void vcache_write_line(struct VisualCache *visual_cache, struct WindowSettings *ws, int cur_y, char *line);
 void calculate_screenY_and_first_printline(struct TextBuffer *buffer,
                                struct ScreenSettings *screen_settings,
                                struct WindowSettings *ws,
@@ -135,8 +134,8 @@ struct WindowSettings windowSettingsInit() {
  }
  ws.screen_width = w.ws_col - ws.left_offset;
  ws.screen_height = w.ws_row - (ws.bottom_offset + ws.top_offset);
-//  ws.screen_width = 64 - ws.left_offset;
-// ws.screen_height = 29 - (ws.bottom_offset + ws.top_offset);
+//  ws.screen_width = 20 - ws.left_offset;
+// ws.screen_height = 10 - (ws.bottom_offset + ws.top_offset);
   return ws;
 }
 
@@ -148,13 +147,18 @@ void die(const char *s) {
 }
 
 void switchToMainScreen() {
-    write(STDOUT_FILENO, "\x1b[?1049l", 7);
+    write(STDOUT_FILENO, "\x1b[?1049l", 8);
+    write(STDOUT_FILENO, "\x1b[?1000l", 8);
+    write(STDOUT_FILENO, "\x1b[?1006l", 8);
 }
 
 void switchToAlternateScreen() {
   atexit(switchToMainScreen);
-  write(STDOUT_FILENO, "\x1b[?1049h", 7);
-  write(STDOUT_FILENO, "\x1b[H\x1b[2J", 7);
+
+  write(STDOUT_FILENO, "\x1b[?1049h", 8);
+
+  write(STDOUT_FILENO, "\x1b[?1000h", 8);
+  write(STDOUT_FILENO, "\x1b[?1006h", 8);
 }
 
 
@@ -569,13 +573,13 @@ void moveCursorDown(struct TextBuffer *buffer,
         curLineWriteChar(buffer, '\r');
         curLineWriteChar(buffer, '\n');
         bufferSaveCurrentLine(buffer);
-        updateLineVisualCache(visual_cache, ws, buffer->cur_y, buffer->cur_line);
+        vcache_write_line(visual_cache, ws, buffer->cur_y, buffer->cur_line);
       }
 
       buffer->cur_y++;
       curLineClearAndResetX(buffer);
       bufferSaveCurrentLine(buffer);
-      addLineVisualCache(visual_cache, ws, buffer->cur_y, buffer->cur_line);
+      vcache_schift_add_line(visual_cache, ws, buffer->cur_y, buffer->cur_line);
     } else {
       buffer->cur_y++;
       bufferLoadCurLine(buffer);
@@ -679,8 +683,6 @@ char *editorPrepareBufferForScreen(struct TextBuffer *buffer,
 
 void editorRefreshScreen(struct TextBuffer *buffer, struct WindowSettings *ws,
                          struct ScreenSettings *screen_settings) {
-  // clear the terminal
-  write(STDOUT_FILENO, "\x1b[2J", 4);
   // put cursor to the begining
   write(STDOUT_FILENO, "\x1b[H", 3);
 
@@ -707,128 +709,23 @@ void editorOutputBufferText(struct TextBuffer *buffer) {
   sleep(1);
 }
 
-static void debug_printf(const char *format, ...) {
-    char buffer[1024]; // Reasonably sized buffer for debug lines
-    va_list args;
-    va_start(args, format);
-    int len = vsnprintf(buffer, sizeof(buffer), format, args);
-    va_end(args);
-
-    if (len > 0) {
-        write(STDOUT_FILENO, buffer, (len < (int) sizeof(buffer)) ? len : sizeof(buffer) -1 );
-    }
-    write(STDOUT_FILENO, "\x1b[1G", 7);
-}
-
-void editorOutputInfo(struct TextBuffer *buffer, struct ScreenSettings *screen_settings, struct WindowSettings *ws, struct VisualCache *visual_cache) {
-    // Clear screen and move cursor to home for debug output visibility
-    write(STDOUT_FILENO, "\x1b[H\x1b[2J", 7);
-
-    debug_printf("--- Debug Info Start ---\n\n");
-
-    // TextBuffer Info
-    debug_printf("TextBuffer (at %p):\n", (void*)buffer);
-    if (buffer) {
-        debug_printf("  lines: %p\n", (void*)buffer->lines);
-        debug_printf("  lines_num: %d\n", buffer->lines_num);
-        debug_printf("  lines_capacity: %d\n", buffer->lines_capacity);
-        debug_printf("  cur_x: %d\n", buffer->cur_x);
-        debug_printf("  cur_y: %d\n", buffer->cur_y);
-        // Truncate cur_line display if it's very long, ensuring null termination for snprintf
-        char temp_cur_line[101]; // Display up to 100 chars of cur_line
-        strncpy(temp_cur_line, buffer->cur_line, 100);
-        temp_cur_line[100] = '\0';
-        debug_printf("  cur_line (first 100): \"%s\"\n", temp_cur_line);
-
-        debug_printf("  First %d lines content (if available):\n", 5);
-        for (int i = 0; i < buffer->lines_num && i < 5; ++i) {
-            if (buffer->lines[i]) {
-                 // Truncate line display if it's very long
-                char temp_line_content[101];
-                strncpy(temp_line_content, buffer->lines[i], 100);
-                temp_line_content[100] = '\0';
-                debug_printf("    lines[%d]: \"%s\"\n", i, temp_line_content);
-            } else {
-                debug_printf("    lines[%d]: (null)\n", i);
-            }
-        }
-    } else {
-        debug_printf("  TextBuffer is NULL\n");
-    }
-    debug_printf("\n");
-
-    // WindowSettings Info
-    debug_printf("WindowSettings (at %p):\n", (void*)ws);
-    if (ws) {
-        debug_printf("  top_offset: %d\n", ws->top_offset);
-        debug_printf("  bottom_offset: %d\n", ws->bottom_offset);
-        debug_printf("  left_offset: %d\n", ws->left_offset);
-        debug_printf("  screen_width: %d\n", ws->screen_width);
-        debug_printf("  screen_height: %d\n", ws->screen_height);
-    } else {
-        debug_printf("  WindowSettings is NULL\n");
-    }
-    debug_printf("\n");
-
-    // ScreenSettings Info
-    debug_printf("ScreenSettings (at %p):\n", (void*)screen_settings);
-    if (screen_settings) {
-        debug_printf("  cursor_x: %d\n", screen_settings->cursor_x);
-        debug_printf("  cursor_y: %d\n", screen_settings->cursor_y);
-        debug_printf("  logical_wanted_x: %d\n", screen_settings->logical_wanted_x);
-        debug_printf("  first_printline: %d\n", screen_settings->first_printline);
-    } else {
-        debug_printf("  ScreenSettings is NULL\n");
-    }
-    debug_printf("\n");
-
-    // VisualCache Info
-    debug_printf("VisualCache (at %p):\n", (void*)visual_cache);
-    if (visual_cache) {
-        debug_printf("  lines_screen_height: %p\n", (void*)visual_cache->lines_screen_height);
-        debug_printf("  lines_num (vc): %d\n", visual_cache->lines_num);
-        debug_printf("  lines_capacity (vc): %d\n", visual_cache->lines_capacity);
-
-        if (visual_cache->lines_screen_height) {
-            debug_printf("  First %d lines_screen_height values (if available):\n", 5);
-            for (int i = 0; i < visual_cache->lines_num && i < 5; ++i) {
-                debug_printf("    lines_screen_height[%d]: %d\n", i, visual_cache->lines_screen_height[i]);
-            }
-        }
-debug_printf("  First %d prefix_sum_line_heights values (if relevant and < 2500):\n",5);
-        // Max index for prefix_sum is visual_cache->lines_num (sum up to line lines_num-1)
-        for (int i = 0; i <= visual_cache->lines_num && i < 5 && i < 2500; ++i) {
-            debug_printf("    prefix_sum_line_heights[%d]: %d\n", i, visual_cache->prefix_sum_line_heights[i]);
-        }
-    } else {
-        debug_printf("  VisualCache is NULL\n");
-    }
-    debug_printf("\n--- Debug Info End ---\n");
-
-    // Ensure all output is flushed before sleep, though write is usually unbuffered to terminal
-    fflush(stdout); // technically for STDOUT_FILENO, fsync(STDOUT_FILENO) or tcdrain(STDOUT_FILENO) might be more direct if issues.
-                    // but for simple debug output, this should be fine.
-
-    sleep(5); // Increased sleep duration to 5 seconds for better readability
-}
 
 //VISUAL_CACHE
 
-void updateLineVisualCache(struct VisualCache *visual_cache, struct WindowSettings *ws, int cur_y,
-                           char *line) {
-  visual_cache->lines_screen_height[cur_y] = getScreenLinesForString(line, ws);
-}
+void visual_cache_ensure_line_capacity(struct VisualCache *visual_cache, int index_to_check){
 
-void addLineVisualCache(struct VisualCache *visual_cache, struct WindowSettings *ws, int cur_y,
-                           char *line) {
+  if(index_to_check >= visual_cache->lines_capacity){
 
-  //ensure enough memory
-  if(visual_cache->lines_num+1>=visual_cache->lines_capacity){
-    int new_capacity = visual_cache->lines_capacity == 0 ? INITIAL_LINES_CAPACITY : visual_cache->lines_capacity;
-    while(visual_cache->lines_num+1 >= new_capacity){
+    assert(visual_cache->lines_capacity > 0);
+
+    int new_capacity = visual_cache->lines_capacity;
+
+    while(index_to_check >= new_capacity){
       new_capacity *= 2;
     }
+
     int *new_array = realloc(visual_cache->lines_screen_height, new_capacity * sizeof(int));
+
     if(!new_array){
       free(visual_cache->lines_screen_height);
       die("addLineVisualCache: failed realloc");
@@ -836,25 +733,37 @@ void addLineVisualCache(struct VisualCache *visual_cache, struct WindowSettings 
       visual_cache->lines_screen_height = new_array;
       visual_cache->lines_capacity = new_capacity;
     }
+
   }
+}
+
+
+void vcache_write_line(struct VisualCache *visual_cache, struct WindowSettings *ws, int cur_y,
+                           char *line) {
+  visual_cache_ensure_line_capacity(visual_cache, cur_y);
+  visual_cache->lines_screen_height[cur_y] = getScreenLinesForString(line, ws);
+}
+
+void vcache_schift_add_line(struct VisualCache *visual_cache, struct WindowSettings *ws, int cur_y,
+                           char *line) {
+  //ensure enough memory
+  visual_cache_ensure_line_capacity(visual_cache, visual_cache->lines_num+1);
 
   moveIntsDown(visual_cache->lines_screen_height, cur_y, &visual_cache->lines_num);
   visual_cache->lines_screen_height[cur_y] = getScreenLinesForString(line, ws);
 }
 
-void removeLineVisualCache(struct VisualCache *visual_cache, int cur_y) {
+
+void vcache_rmv_line(struct VisualCache *visual_cache, int cur_y) {
   moveIntsUp(visual_cache->lines_screen_height, &visual_cache->lines_num, cur_y);
 }
 
 // INPUT
 
 void bufferLoadCurLine(struct TextBuffer *buffer) {
+  assert(buffer->cur_y != buffer->lines_num);
   if (buffer->cur_y < buffer->lines_num) {
     copyLine(buffer->lines[buffer->cur_y], buffer->cur_line);
-  } else {
-    // die("bufferLoadCurLine: trying to add in the buffer a line, that doesnt
-    // exist");
-    curLineClearAndResetX(buffer);
   }
 }
 
@@ -881,7 +790,7 @@ void curLineDeleteChar(struct TextBuffer *buffer,
     }
 
     moveRowsUp(buffer->lines, &buffer->lines_num, buffer->cur_y);
-    removeLineVisualCache(visual_cache, buffer->cur_y);
+    vcache_rmv_line(visual_cache, buffer->cur_y);
 
     buffer->cur_y--;
     curLineClearAndResetX(buffer);
@@ -889,7 +798,7 @@ void curLineDeleteChar(struct TextBuffer *buffer,
     free(appended_line);
 
     bufferSaveCurrentLine(buffer);
-    updateLineVisualCache(visual_cache, ws, buffer->cur_y, buffer->cur_line);
+    vcache_write_line(visual_cache, ws, buffer->cur_y, buffer->cur_line);
 
     buffer->cur_x = len_prev_str;
     screen_settings->logical_wanted_x = buffer->cur_x + 1;
@@ -897,7 +806,7 @@ void curLineDeleteChar(struct TextBuffer *buffer,
     moveCharsLeft(buffer->cur_line, buffer->cur_x, 1);
     buffer->cur_x--;
     bufferSaveCurrentLine(buffer);
-    updateLineVisualCache(visual_cache, ws, buffer->cur_y, buffer->cur_line);
+    vcache_write_line(visual_cache, ws, buffer->cur_y, buffer->cur_line);
   }
 }
 
@@ -995,13 +904,13 @@ void bufferHandleNewLineInput(struct TextBuffer *buffer,
 
   curLineWriteChars(buffer, first_half);
   bufferSaveCurrentLine(buffer);
-  updateLineVisualCache(visual_cache, ws, buffer->cur_y, buffer->cur_line);
+  vcache_write_line(visual_cache, ws, buffer->cur_y, buffer->cur_line);
 
   buffer->cur_y++;
   curLineClearAndResetX(buffer);
   curLineWriteChars(buffer, second_half);
   bufferSaveCurrentLine(buffer);
-  addLineVisualCache(visual_cache, ws, buffer->cur_y, buffer->cur_line);
+  vcache_schift_add_line(visual_cache, ws, buffer->cur_y, buffer->cur_line);
 
   buffer->cur_x = 0;
   screen_settings->logical_wanted_x = 1;
@@ -1034,6 +943,13 @@ void bufferHandleEscapeSequence(struct TextBuffer *buffer,
   case 'D':
     moveCursorLeft(buffer, screen_settings);
     break;
+  case '<':
+    // This is a mouse event. Consume until 'M' or 'm'.
+    do {
+        if (!isInputAvailable()) return;
+        c = editorReadKey();
+    } while (c != 'M' && c != 'm');  // end of SGR mouse event
+    break;
   }
 }
 
@@ -1052,9 +968,6 @@ void editorProcessKeypress(struct TextBuffer *buffer, struct WindowSettings *ws,
     break;
   case CTRL_KEY('p'):
     editorOutputBufferText(buffer);
-    break;
-  case CTRL_KEY('i'):
-    editorOutputInfo(buffer, screen_settings, ws, visual_cache);
     break;
   case DEL:
   case BACKSPACE:
@@ -1076,7 +989,7 @@ void editorProcessKeypress(struct TextBuffer *buffer, struct WindowSettings *ws,
 
     curLineWriteChar(buffer, c);
     bufferSaveCurrentLine(buffer);
-    updateLineVisualCache(visual_cache, ws, buffer->cur_y, buffer->cur_line);
+    vcache_write_line(visual_cache, ws, buffer->cur_y, buffer->cur_line);
     screen_settings->logical_wanted_x = buffer->cur_x + 1;
     break;
   }
@@ -1086,18 +999,126 @@ void editorProcessKeypress(struct TextBuffer *buffer, struct WindowSettings *ws,
   editorRefreshCursor(screen_settings);
 }
 
+//FILE READ
+
+void write_content_in_buffer(char *content, int content_size, struct TextBuffer *buffer, struct WindowSettings *ws, struct VisualCache *visual_cache){
+  if(content == NULL || content_size == 0) return;
+
+  int c = 0;
+
+  for(; c < content_size; c++){
+    if(buffer->cur_y == buffer->lines_num) buffer->lines_num++;
+
+    if(content[c] == '\n'){
+      curLineWriteChar(buffer, '\r');
+      curLineWriteChar(buffer, '\n');
+      bufferSaveCurrentLine(buffer);
+      vcache_schift_add_line(visual_cache, ws, buffer->cur_y, buffer->cur_line);
+      buffer->cur_y++;
+      curLineClearAndResetX(buffer);
+    }else{
+      curLineWriteChar(buffer, content[c]);
+    }
+    vcache_write_line(visual_cache, ws, buffer->cur_y, buffer->cur_line);
+  }
+  buffer->cur_y = 0;
+  buffer->cur_x = 0;
+}
+
+
+char *read_file(const char *file_path, size_t *size) {
+  char *buffer = NULL;
+
+  FILE *f = fopen(file_path, "r+");
+  if (f == NULL) {
+    goto error;
+  }
+
+  if (fseek(f, 0, SEEK_END) < 0) {
+    goto error;
+  }
+
+  long m = ftell(f);
+  if (m < 0) {
+    goto error;
+  }
+
+  buffer = malloc(sizeof(char) * m);
+  if (buffer == NULL) {
+    goto error;
+  }
+
+  if (fseek(f, 0, SEEK_SET) < 0) {
+    goto error;
+  }
+
+  size_t n = fread(buffer, 1, m, f);
+  assert(n == (size_t)m);
+
+  if (ferror(f)) {
+    goto error;
+  }
+
+  if (size) {
+    *size = n;
+  }
+
+  fclose(f);
+
+  return buffer;
+
+error:
+  if (f) {
+    fclose(f);
+  }
+
+  if (buffer) {
+    free(buffer);
+  }
+
+  return NULL;
+}
+
+void write_file(){
+
+}
+
+
 // INIT
-int main() {
+int main(int argc, char **argv) {
+
+  if (argc < 2) {
+      fprintf(stderr, "ERROR: input file is not provided\n");
+      exit(1);
+  }
+
+  const char *input_file_path = argv[1];
+  size_t content_size = 0;
+  char *file_content = read_file(input_file_path, &content_size);
+
+  if (file_content == NULL) {
+        fprintf(stderr, "ERROR: could not read file %s: %s\n",
+                input_file_path, strerror(errno));
+        exit(1);
+  }
+
   switchToAlternateScreen();
   enableRawMode();
   struct TextBuffer buffer = textBufferInit();
   struct WindowSettings ws = windowSettingsInit();
   struct ScreenSettings screen_settings = {1, 1, 1, 0};
   struct VisualCache visual_cache = visualCacheInit();
+
+  write_content_in_buffer(file_content, content_size, &buffer, &ws, &visual_cache);
+  bufferLoadCurLine(&buffer);
+
+  editorUpdateCursorCoordinates(&buffer, &ws, &screen_settings, &visual_cache);
   editorRefreshScreen(&buffer, &ws, &screen_settings);
+  editorRefreshCursor(&screen_settings);
   while (1) {
     editorProcessKeypress(&buffer, &ws, &screen_settings, &visual_cache);
   }
+
   cleanEditor();
   return 0;
 }
