@@ -1120,5 +1120,6 @@ int main(int argc, char **argv) {
   }
 
   cleanEditor();
+
   return 0;
 }
