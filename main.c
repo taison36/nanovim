@@ -683,6 +683,9 @@ char *editorPrepareBufferForScreen(struct TextBuffer *buffer,
 
 void editorRefreshScreen(struct TextBuffer *buffer, struct WindowSettings *ws,
                          struct ScreenSettings *screen_settings) {
+
+  // clear
+  write(STDOUT_FILENO, "\x1b[2J", 4);
   // put cursor to the begining
   write(STDOUT_FILENO, "\x1b[H", 3);
 
