@@ -47,6 +47,7 @@ void curLineWriteChars(struct TextBuffer *buffer, const char *chars);
 void bufferHandleNewLineInput(struct TextBuffer *buffer,
                               struct ScreenSettings *screen_settings, struct VisualCache *visual_cache, struct WindowSettings *ws);
 int countNewLineChars(const char *str);
+int panel_longest_message_len(void);
 void editorEnsureLineCapacity(struct TextBuffer *buffer, int required_idx);
 char *addNewLineChar(char *str);
 void vcache_write_line(struct VisualCache *visual_cache, struct WindowSettings *ws, int cur_y, char *line);
@@ -54,7 +55,7 @@ void calculate_screenY_and_first_printline(struct TextBuffer *buffer,
                                struct ScreenSettings *screen_settings,
                                struct WindowSettings *ws,
                                struct VisualCache *visual_cache);
-int getScreenLinesForString(const char *str, int screen_width);
+int getScreenLinesForString(const char *str, struct WindowSettings *ws);
 
 // INIT
 struct TextBuffer {
@@ -109,7 +110,7 @@ static int global_buffer_initialized = 0;
 
 static const char* panel_bottom_messages[PANEL_COUNT] = {
     [PANEL_DEFAULT]      = "\x1b[30;47m ^Q Exit  ^H Help \x1b[0m",
-    [PANEL_QUIT_CONFIRM] = "\x1b[30;47m Do you want to save the changes, buddy? [Y]es / [N]o \x1b[0m",
+    [PANEL_QUIT_CONFIRM] = "\x1b[30;47m Do you want to save the changes, buddy? \x1b[0m [Y]es / [N]o",
     [PANEL_HELP]         = "\x1b[30;47m Nobody can help you, man \x1b[0m"
 };
 static BottomPanelMessage panel_current_message = PANEL_DEFAULT;
@@ -163,25 +164,20 @@ struct VisualCache visualCacheInit(){
 struct WindowSettings windowSettingsInit() {
   struct WindowSettings ws;
 
-  struct winsize w;
-  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == -1) {
-    die("windowSettingsInit: ioctl. Cannot proceed without terminal size");
-  }
-
   ws.top_offset = 0;
-  ws.bottom_offset = getScreenLinesForString(panel_bottom_messages[PANEL_DEFAULT], w.ws_col); // +1 for the space beetwen text
+  ws.bottom_offset = panel_longest_message_len() + 1; // +1 for the space beetwen text
   ws.left_offset = 0;
 
+ struct winsize w;
+ if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == -1) {
+   die("windowSettingsInit: ioctl. Cannot proceed without terminal size");
+ }
  ws.terminal_width = w.ws_col;
  ws.terminal_height = w.ws_row;
-
-// ws.terminal_width = 40;
-// ws.terminal_height = 20;
-
- ws.screen_width  = ws.terminal_width - ws.left_offset;
- ws.screen_height = ws.terminal_height- (ws.bottom_offset + ws.top_offset);
-
-
+ ws.screen_width = w.ws_col - ws.left_offset;
+ ws.screen_height = w.ws_row - (ws.bottom_offset + ws.top_offset);
+//  ws.screen_width = 20 - ws.left_offset;
+// ws.screen_height = 10 - (ws.bottom_offset + ws.top_offset);
   return ws;
 }
 
@@ -460,7 +456,7 @@ char *makeStringFromInt(int n) {
   return str;
 }
 
-int getScreenLinesForString(const char *str, int screen_width) {
+int getScreenLinesForString(const char *str, struct WindowSettings *ws) {
   if (str == NULL) {
     return 1;
   }
@@ -473,10 +469,10 @@ int getScreenLinesForString(const char *str, int screen_width) {
     return 1;
   }
 
-  if (screen_width == 0){
+  if (ws->screen_width == 0){
     return 1;
   }
-  return (stringLength / screen_width) + ((stringLength % screen_width != 0) ? 1 : 0);
+  return (stringLength / ws->screen_width) + ((stringLength % ws->screen_width != 0) ? 1 : 0);
 }
 
 // DYNAMIC ARRAY MANAGEMENT for buffer->lines
@@ -649,6 +645,17 @@ void panel_set_bottom_msg(BottomPanelMessage msg) {
     }
 }
 
+int panel_longest_message_len() {
+    int max_len = 0;
+    for (int i = 0; i < PANEL_COUNT; ++i) {
+        int len = strlen(panel_bottom_messages[i]);
+        if (len > max_len) {
+            max_len = len;
+        }
+    }
+    return getScreenLinesForString(max_len, ws);
+}
+
 void calculate_screenY_and_first_printline(struct TextBuffer *buffer,
                                            struct ScreenSettings *screen_settings,
                                            struct WindowSettings *ws,
@@ -717,8 +724,15 @@ void screen_buffer_write_line(const char *line, struct ScreenBuffer *screen_buff
 
 void screen_buffer_write_bottom_panel( struct WindowSettings *ws,
                                    struct ScreenBuffer *screen_buffer){
+
   int panel_rows_num = 0;
+  char* panel_space = malloc(ws->screen_width);
+  for(int i = 0; i<ws->screen_width;i++){
+    panel_space[i] = '-';
+  }
+  screen_buffer_write_line(panel_space, screen_buffer, &panel_rows_num, ws->bottom_offset, ws->screen_width);
   screen_buffer_write_line(panel_bottom_messages[panel_current_message], screen_buffer, &panel_rows_num, ws->bottom_offset, ws->screen_width);
+  free(panel_space);
 }
 
 char* editor_prepare_screen_buffer(struct TextBuffer *buffer,
@@ -755,34 +769,41 @@ void editorRefreshScreen(struct TextBuffer *buffer, struct WindowSettings *ws,
   write(STDOUT_FILENO, "\x1b[H", 3);
 
   char *sb_text = editor_prepare_screen_buffer(buffer, ws, screen_settings);
+
   write(STDOUT_FILENO, sb_text, strlen(sb_text));
 
-  char *sb_panel = editor_prepare_panel_screen(ws);
-  int panel_begin_y = ws->terminal_height - ws->bottom_offset+1; // cursor indexed startin from 1
+ // char *sb_panel = editor_prepare_panel_screen(ws);
+ // int panel_begin_y = ws->terminal_height - ws->bottom_offset+1;
+ // int panel_begin_x = ws->terminal_width - ws->left_offset+1;
 
-  char *y = makeStringFromInt(panel_begin_y);
-  int len = 6 + strlen(y);
-  char *str = malloc(len + 1);
+ // char *x = makeStringFromInt(panel_begin_x);
+ // char *y = makeStringFromInt(panel_begin_y);
+ // int len = 5 + strlen(x) + strlen(y);
+ // char *str = malloc(len + 1);
 
-  if (!str) {
-    free(sb_text);
-    free(sb_panel);
-    free(y);
-    die("editorRefreshScreen: malloc failed");
-  }
+ // if (!str) {
+ //   free(sb_text);
+ //   free(sb_panel);
+ //   free(x);
+ //   free(y);
+ //   die("editorRefreshScreen: malloc failed");
+ // }
 
-  strcpy(str, "\x1b[");
-  strcat(str, y);
-  strcat(str, ";1H");
+ // strcpy(str, "\x1b[");
+ // strcat(str, y);
+ // strcat(str, ";");
+ // strcat(str, x);
+ // strcat(str, "H");
 
-  write(STDOUT_FILENO, str, len);
-  write(STDOUT_FILENO, sb_panel, strlen(sb_panel));
+ // write(STDOUT_FILENO, str, len);
+ // write(STDOUT_FILENO, sb_panel, strlen(sb_panel));
 
-  free(y);
-  free(str);
+ // free(y);
+ // free(x);
+ // free(str);
 
   free(sb_text);
-  free(sb_panel);
+  //free(sb_panel);
 
 }
 
@@ -834,7 +855,7 @@ void visual_cache_ensure_line_capacity(struct VisualCache *visual_cache, int ind
 void vcache_write_line(struct VisualCache *visual_cache, struct WindowSettings *ws, int cur_y,
                            char *line) {
   visual_cache_ensure_line_capacity(visual_cache, cur_y);
-  visual_cache->lines_screen_height[cur_y] = getScreenLinesForString(line, ws->screen_width);
+  visual_cache->lines_screen_height[cur_y] = getScreenLinesForString(line, ws);
 }
 
 void vcache_schift_add_line(struct VisualCache *visual_cache, struct WindowSettings *ws, int cur_y,
@@ -843,7 +864,7 @@ void vcache_schift_add_line(struct VisualCache *visual_cache, struct WindowSetti
   visual_cache_ensure_line_capacity(visual_cache, visual_cache->lines_num+1);
 
   moveIntsDown(visual_cache->lines_screen_height, cur_y, &visual_cache->lines_num);
-  visual_cache->lines_screen_height[cur_y] = getScreenLinesForString(line, ws->screen_width);
+  visual_cache->lines_screen_height[cur_y] = getScreenLinesForString(line, ws);
 }
 
 
@@ -866,9 +887,7 @@ void write_content_in_buffer(char *content, int content_size, struct TextBuffer 
     }
 
     if(content[c] == '\n'){
-      if(c>0 && content[c-1] != '\r'){
-        curLineWriteChar(buffer, '\r');
-      }
+      curLineWriteChar(buffer, '\r');
       curLineWriteChar(buffer, '\n');
       bufferSaveCurrentLine(buffer);
       vcache_write_line(visual_cache, ws, buffer->cur_y, buffer->cur_line);
@@ -949,23 +968,14 @@ void write_file(struct TextBuffer *buffer){
   for(int y = 0; y < buffer->lines_num; ++y){
     char *line = buffer->lines[y];
     size_t len = strlen(line);
-    size_t written = fwrite(line, sizeof(char), len , f);
 
-    if(written != len){
-      goto error;
+    for(size_t x = 0; x < len; ++x){
+      size_t written = fwrite(line, sizeof(char), len , f);
+      if(written != len){
+        goto error;
+      }
     }
   }
-
-  if(buffer->lines[buffer->lines_num] != NULL){
-    char *line = buffer->lines[buffer->lines_num];
-    size_t len = strlen(line);
-    size_t written = fwrite(line, sizeof(char), len , f);
-
-    if(written != len){
-      goto error;
-    }
-  }
-
 
 error:
   if (f) {
